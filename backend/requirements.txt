@@ -1,0 +1,23 @@
+# Core
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.10.4
+python-dotenv==1.0.1
+python-multipart==0.0.18
+
+# Database
+psycopg2-binary==2.9.10
+pgvector==0.3.6
+sqlalchemy==2.0.35
+
+# PDF Processing
+pymupdf==1.25.1
+pytesseract==0.3.13
+pdfplumber==0.11.4
+Pillow==11.1.0
+
+# Embeddings (lokalt)
+sentence-transformers==3.2.1
+
+# LLM (lokal via Ollama)
+httpx==0.28.1
