@@ -1,132 +1,112 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project Overview
 
-A PDF RAG (Retrieval-Augmented Generation) system built with LangChain. Users upload PDFs and ask questions; the system retrieves relevant chunks and generates AI answers using the Google Gemini API. Embeddings and reranking run fully locally; only LLM inference calls leave the machine.
+A PDF RAG (Retrieval-Augmented Generation) system. Users upload PDFs, which are chunked and embedded. Questions are answered by retrieving relevant chunks via hybrid search and generating a response using Google Gemini.
+
+## Running the System
+
+**Prerequisites:** Docker Desktop running, Python 3.12+
+
+### Start infrastructure
+```bash
+docker start postgres-pgvector
+```
+
+### Backend
+```bash
+cd backend
+.\venv\Scripts\Activate.ps1        # Windows PowerShell
+uvicorn app.main:app --reload      # http://localhost:8000
+```
+
+### Frontend
+```bash
+cd frontend
+.\venv\Scripts\Activate.ps1
+streamlit run app.py               # http://localhost:8501
+```
+
+### Install dependencies (first time)
+```bash
+# Backend
+cd backend && python -m venv venv && .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# Frontend
+cd frontend && python -m venv venv && .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+## Environment Variables
+
+`backend/.env` requires:
+```
+DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres
+GOOGLE_API_KEY=<your-key>          # Required for embeddings and LLM
+```
+
+> **Note:** The README mentions Ollama/llama3.2 but the actual implementation uses Google Gemini API for both embeddings (`gemini-embedding-001`) and LLM (`gemini-2.0-flash`).
 
 ## Architecture
 
 ```
-Streamlit UI (port 8501)
-    └── FastAPI backend (port 8000)
-            ├── PostgreSQL + pgvector (port 5433, via Docker)
-            │     └── langchain_pg_collection / langchain_pg_embedding (managed by LangChain PGVector)
-            ├── Google Gemini API (gemini-2.0-flash, requires GOOGLE_API_KEY)
-            └── sentence-transformers (local embeddings, 768-dim)
+frontend/app.py  (Streamlit)
+      |  HTTP
+backend/app/main.py  (FastAPI)
+      |
+      +-- pdf_extraction.py     PyMuPDF + Tesseract OCR
+      +-- rag/chunking.py       LangChain RecursiveCharacterTextSplitter (500 chars, 100 overlap)
+      +-- rag/embeddings.py     Google Gemini embeddings + HuggingFace CrossEncoder reranker
+      +-- rag/search.py         Hybrid search (EnsembleRetriever: PGVector + PostgreSQL FTS)
+      +-- rag/llm.py            Google Gemini LLM via LangChain ChatGoogleGenerativeAI
+      +-- rag/chains.py         LCEL RAG chain (create_rag_chain helper, not used by /ask directly)
+      |
+      +-- database.py           SQLAlchemy (psycopg2)
+      +-- models.py             ORM: Category, PdfDocument, DocumentMetadata
 ```
 
-## Project Structure
+### Dual database connection pattern
 
-```
-kunskapskontroll-del2/
-├── backend/
-│   ├── app/
-│   │   ├── main.py            # FastAPI routes & endpoints
-│   │   ├── models.py          # SQLAlchemy ORM models (Category, PdfDocument, DocumentMetadata)
-│   │   ├── database.py        # PostgreSQL connection
-│   │   ├── pdf_extraction.py  # PyMuPDF + Tesseract OCR
-│   │   └── rag/
-│   │       ├── chains.py      # LCEL RAG chain (create_retrieval_chain)
-│   │       ├── chunking.py    # RecursiveCharacterTextSplitter
-│   │       ├── embeddings.py  # HuggingFaceEmbeddings + CrossEncoder reranking
-│   │       ├── llm.py         # ChatGoogleGenerativeAI (Gemini)
-│   │       └── search.py      # PGVector + EnsembleRetriever + ContextualCompressionRetriever
-│   ├── requirements.txt
-│   └── .env                   # DATABASE_URL + GOOGLE_API_KEY (not committed)
-├── frontend/
-│   ├── app.py                 # Streamlit UI
-│   └── requirements.txt
-├── setup.ps1                  # Windows first-time setup
-└── README.md
-```
+The codebase maintains two separate database connections:
+- **psycopg2** (`postgresql://...`) — used by SQLAlchemy for the app's own tables (`categories`, `pdf_documents`, `document_metadata`)
+- **psycopg3** (`postgresql+psycopg://...`) — required by `langchain-postgres` PGVector for the vector store (`langchain_pg_collection`, `langchain_pg_embedding`)
 
-## Running the Project
+`search.py` converts the URL format automatically via `_get_pgvector_url()`.
 
-All commands use PowerShell and project-local virtual environments.
+### Search pipeline
 
-```powershell
-# 1. Start PostgreSQL (Docker must be running)
-docker start postgres-pgvector
+1. **Semantic:** PGVector cosine similarity via `langchain_postgres.PGVector`
+2. **Keyword:** Custom `KeywordRetriever` using PostgreSQL `tsvector`/`plainto_tsquery`
+3. **Fusion:** `EnsembleRetriever` with weighted RRF (semantic 0.7, keyword 0.3)
+4. **Reranking (optional):** `ContextualCompressionRetriever` + `CrossEncoderReranker` (`ms-marco-MiniLM-L-6-v2`)
 
-# 2. Backend (Terminal 1)
-cd backend
-.\venv\Scripts\Activate.ps1
-uvicorn app.main:app --reload
+### PDF processing
 
-# 3. Frontend (Terminal 2)
-cd frontend
-.\venv\Scripts\Activate.ps1
-streamlit run app.py
-```
+`pdf_extraction.py` auto-detects whether each page needs OCR: pages with fewer than 40 chars of extractable text and images are OCR'd with Tesseract. Tables are extracted as Markdown via `pdfplumber` when financial keywords are detected.
 
-Visit `http://localhost:8501` in the browser.
+## Database Schema
 
-## Environment Variables
+**App tables** (SQLAlchemy-managed):
+- `categories` — `category_id`, `name`
+- `pdf_documents` — `document_id`, `title`, `category_id`, `language`, `upload_date`, `pdf_data` (raw PDF bytes stored in DB)
+- `document_metadata` — key-value pairs per document
 
-```
-# backend/.env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres
-GOOGLE_API_KEY=your-gemini-api-key-here
-```
-
-Get a Gemini API key at https://aistudio.google.com/app/apikey
+**LangChain tables** (auto-created by PGVector on startup):
+- `langchain_pg_collection` — named collections
+- `langchain_pg_embedding` — vectors + `cmetadata` JSONB (stores `document_id`, `document_title`, `page_number`, `chunk_index`, `category_id`, `language`, `upload_date`)
 
 ## Key API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
+| Method | Path | Description |
+|--------|------|-------------|
 | `POST` | `/ask` | RAG question answering |
-| `POST` | `/search` | Hybrid semantic + keyword search |
-| `POST` | `/search/semantic` | Semantic-only search |
-| `POST` | `/search/keyword` | Keyword-only search |
-| `POST` | `/documents/upload` | Upload PDF |
-| `GET` | `/documents` | List documents |
-| `DELETE` | `/documents/{id}` | Delete document |
-| `GET` | `/health` | Health check |
-| `GET` | `/info` | System info |
-| `GET` | `/stats` | Document statistics |
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Backend | FastAPI 0.115.6, Python 3.12, uvicorn |
-| Database | PostgreSQL + pgvector (SQLAlchemy 2.0, psycopg2) |
-| Vector store | langchain-postgres PGVector (psycopg3) |
-| Embeddings | HuggingFaceEmbeddings / sentence-transformers 3.2.1 (768-dim) |
-| Reranking | CrossEncoderReranker (cross-encoder/ms-marco-MiniLM-L-6-v2) |
-| LLM | Google Gemini API (gemini-2.0-flash) via langchain-google-genai |
-| RAG framework | LangChain 0.3 (LCEL, EnsembleRetriever, ContextualCompressionRetriever) |
-| Frontend | Streamlit 1.41.1 |
-| PDF | PyMuPDF + pytesseract + pdfplumber |
-
-## Database Models (SQLAlchemy ORM)
-
-- `Category` — document categories
-- `PdfDocument` — uploaded PDF metadata and binary data
-- `DocumentMetadata` — key/value metadata per document
-
-Chunk storage is handled entirely by LangChain's PGVector in two auto-managed tables:
-- `langchain_pg_collection` — collection registry (`pdf_chunks`)
-- `langchain_pg_embedding` — chunk text + 768-dim vectors + JSONB metadata
-
-## RAG Pipeline
-
-1. User question → embed with `HuggingFaceEmbeddings` (local)
-2. Hybrid search via `EnsembleRetriever`:
-   - Semantic leg: `PGVector.as_retriever()` (cosine similarity)
-   - Keyword leg: custom `KeywordRetriever` (PostgreSQL `tsvector` FTS on `langchain_pg_embedding.document`)
-   - Merged with weighted Reciprocal Rank Fusion (semantic 0.7, keyword 0.3)
-3. Optional cross-encoder reranking via `ContextualCompressionRetriever` + `CrossEncoderReranker`
-4. Top-k chunks + question → `ChatGoogleGenerativeAI` (Gemini)
-5. Gemini generates a grounded answer with source citations
-
-## Development Notes
-
-- **LangChain 0.3** — RAG pipeline uses LCEL; no custom SQL search code
-- **No tests** — testing is done manually via the Streamlit UI or health/info endpoints
-- Separate `venv/` in both `backend/` and `frontend/` — always activate the correct one
-- PGVector tables are created automatically on first backend startup
-- Embeddings load on first request (~a few seconds); subsequent requests are fast
-- The `.env` file is gitignored; do not commit credentials
-- `chunk_id` in search results is always `0` — LangChain uses UUIDs internally, not sequential ints
+| `POST` | `/search` | Hybrid search (supports `rerank`, `semantic_weight`, `keyword_weight`) |
+| `POST` | `/search/semantic` | Vector-only search |
+| `POST` | `/search/keyword` | FTS-only search |
+| `POST` | `/documents/upload` | Upload PDF (multipart) |
+| `GET` | `/documents/{id}/chunks` | List stored chunks for a document |
+| `GET` | `/info` | System info including LLM/embedding model status |
+| `GET` | `/stats` | Document and chunk counts |
