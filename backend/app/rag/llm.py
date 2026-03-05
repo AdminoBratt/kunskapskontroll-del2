@@ -1,16 +1,31 @@
 """
-Local LLM integration via Ollama.
+LLM integration via Google Gemini API using LangChain's ChatGoogleGenerativeAI.
 
-Requires Ollama to be installed and running locally.
-Install: https://ollama.ai
-Start model: ollama pull llama3.2
+Requires a Google API key:
+  Set GOOGLE_API_KEY in backend/.env
+  Get a key at: https://aistudio.google.com/app/apikey
 """
 
-import httpx
+import os
 from typing import Optional
 
-OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "llama3.2"
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+
+DEFAULT_MODEL = "gemini-2.0-flash"
+
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on provided context.
+
+Rules:
+- Answer ONLY based on the information in the context below
+- If the answer is not in the context, say so clearly
+- Be concise and direct
+- Answer in the same language as the question"""
+
+
+def get_llm(model: str = DEFAULT_MODEL) -> ChatGoogleGenerativeAI:
+    """Get a ChatGoogleGenerativeAI instance for the given model."""
+    return ChatGoogleGenerativeAI(model=model, temperature=0.3)
 
 
 async def generate_answer(
@@ -21,28 +36,24 @@ async def generate_answer(
 ) -> str:
     """
     Generate answer based on question and context chunks.
-    
+
     Args:
         query: The user's question
         context_chunks: List of relevant text chunks from the search
-        model: Ollama model name
-        system_prompt: Optional system prompt
-    
+        model: Gemini model name (e.g. gemini-2.0-flash)
+        system_prompt: Optional system prompt (uses default if None)
+
     Returns:
-        Generated answer from LLM
+        Generated answer from Gemini
     """
     if system_prompt is None:
-        system_prompt = """You are a helpful assistant that answers questions based on provided context.
-
-Rules:
-- Answer ONLY based on the information in the context below
-- If the answer is not in the context, say so clearly
-- Be concise and direct
-- Answer in the same language as the question"""
+        system_prompt = SYSTEM_PROMPT
 
     context_text = "\n\n---\n\n".join(context_chunks)
-    
-    user_prompt = f"""CONTEXT:
+
+    full_prompt = f"""{system_prompt}
+
+CONTEXT:
 {context_text}
 
 QUESTION:
@@ -50,49 +61,31 @@ QUESTION:
 
 ANSWER:"""
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={
-                "model": model,
-                "prompt": user_prompt,
-                "system": system_prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.9,
-                }
-            }
-        )
-        response.raise_for_status()
-        return response.json()["response"]
+    llm = get_llm(model)
+    response = await llm.ainvoke([HumanMessage(content=full_prompt)])
+    return response.content
 
 
-async def check_ollama_status() -> dict:
-    """Check if Ollama is available and which models exist."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
-            response.raise_for_status()
-            models = response.json().get("models", [])
-            return {
-                "available": True,
-                "models": [m["name"] for m in models],
-                "default_model": DEFAULT_MODEL,
-            }
-    except Exception as e:
+async def check_llm_status() -> dict:
+    """Check if the Gemini API key is configured."""
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    if not api_key:
         return {
             "available": False,
-            "error": str(e),
-            "hint": "Start Ollama with: ollama serve",
+            "error": "GOOGLE_API_KEY not set",
+            "hint": "Add GOOGLE_API_KEY=<your-key> to backend/.env",
         }
+    return {
+        "available": True,
+        "default_model": DEFAULT_MODEL,
+        "provider": "Google Gemini API",
+    }
 
 
 def get_llm_info() -> dict:
     """Return information about the LLM configuration."""
     return {
-        "provider": "Ollama (local)",
-        "base_url": OLLAMA_BASE_URL,
+        "provider": "Google Gemini API via LangChain ChatGoogleGenerativeAI",
         "default_model": DEFAULT_MODEL,
-        "privacy": "100% local - no data leaves the machine",
+        "privacy": "Queries are sent to Google's API",
     }
