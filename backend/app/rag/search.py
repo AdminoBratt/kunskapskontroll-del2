@@ -1,17 +1,88 @@
 """
-Hybrid search: combines semantic vector search with full-text search.
+Hybrid search using LangChain's PGVector, EnsembleRetriever,
+and ContextualCompressionRetriever with CrossEncoderReranker.
 
-Uses Reciprocal Rank Fusion (RRF) to combine results from both search methods.
+Vector store: langchain_postgres.PGVector (manages langchain_pg_collection /
+langchain_pg_embedding tables).
+Hybrid fusion: EnsembleRetriever with weighted RRF (semantic 0.7, keyword 0.3).
+Reranking: CrossEncoderReranker via ContextualCompressionRetriever.
 """
 
+import json
+import os
 from dataclasses import dataclass
-from typing import List, Optional
 from datetime import datetime
+from typing import List, Optional
 
-from sqlalchemy import text
+from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+from langchain_postgres import PGVector
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from app.rag.embeddings import get_embeddings, rerank_results
+from app.rag.embeddings import get_cross_encoder_model_name, get_embeddings
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/postgres"
+)
+COLLECTION_NAME = "pdf_chunks"
+
+
+# ---------------------------------------------------------------------------
+# SQLAlchemy engine for direct SQL queries (keyword FTS, chunk listing, etc.)
+# Uses psycopg2 dialect (same as the main app engine).
+# ---------------------------------------------------------------------------
+
+_search_engine = None
+
+
+def _get_search_engine():
+    global _search_engine
+    if _search_engine is None:
+        url = DATABASE_URL
+        if url.startswith("postgresql://"):
+            url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+        _search_engine = create_engine(url)
+    return _search_engine
+
+
+# ---------------------------------------------------------------------------
+# PGVector store (psycopg3 connection string required by langchain-postgres)
+# ---------------------------------------------------------------------------
+
+_vector_store: Optional[PGVector] = None
+
+
+def _get_pgvector_url() -> str:
+    """Convert DATABASE_URL to psycopg3 format for langchain-postgres."""
+    url = DATABASE_URL
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    if url.startswith("postgresql+psycopg2://"):
+        return "postgresql+psycopg://" + url[len("postgresql+psycopg2://"):]
+    return url
+
+
+def get_vector_store() -> PGVector:
+    """Get (or lazily create) the PGVector store singleton."""
+    global _vector_store
+    if _vector_store is None:
+        _vector_store = PGVector(
+            connection=_get_pgvector_url(),
+            embeddings=get_embeddings(),
+            collection_name=COLLECTION_NAME,
+            use_jsonb=True,
+        )
+    return _vector_store
+
+
+# ---------------------------------------------------------------------------
+# Data classes (unchanged public interface)
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -33,180 +104,246 @@ class SearchResult:
     rerank_score: Optional[float] = None
 
 
-@dataclass 
+@dataclass
 class SearchResponse:
     """Response from the search function."""
     query: str
     results: List[SearchResult]
     total_count: int
-    search_type: str  # "hybrid", "semantic", "keyword"
+    search_type: str  # "hybrid", "semantic", "keyword", "hybrid_reranked"
 
 
-def semantic_search(
-    db: Session,
-    query: str,
-    k: int = 20,
-    category_id: Optional[int] = None,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-) -> List[tuple]:
-    """
-    Semantic search with vector similarity.
-    
-    Returns:
-        List of tuples (chunk_id, distance, rank)
-    """
-    embedder = get_embeddings()
-    query_embedding = embedder.embed_query(query)
-    embedding_str = str(query_embedding)
-    
-    filters = []
-    params = {"embedding": embedding_str, "limit": k}
-    
-    if category_id:
-        filters.append("pd.category_id = :category_id")
-        params["category_id"] = category_id
-    if date_from:
-        filters.append("pd.upload_date >= :date_from")
-        params["date_from"] = date_from
-    if date_to:
-        filters.append("pd.upload_date <= :date_to")
-        params["date_to"] = date_to
-    
-    where_clause = "WHERE " + " AND ".join(filters) if filters else ""
-    
-    sql = f"""
-        SELECT 
-            dc.chunk_id,
-            ce.embedding <=> :embedding AS distance
-        FROM chunk_embeddings ce
-        JOIN document_chunks dc ON dc.chunk_id = ce.chunk_id
-        JOIN pdf_documents pd ON pd.document_id = dc.document_id
-        {where_clause}
-        ORDER BY ce.embedding <=> :embedding
-        LIMIT :limit
-    """
-    
-    results = db.execute(text(sql), params).fetchall()
-    return [(r.chunk_id, r.distance, idx + 1) for idx, r in enumerate(results)]
+# ---------------------------------------------------------------------------
+# Keyword retriever (custom BaseRetriever with PostgreSQL FTS)
+# ---------------------------------------------------------------------------
 
 
-def keyword_search(
-    db: Session,
-    query: str,
-    k: int = 20,
-    category_id: Optional[int] = None,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-) -> List[tuple]:
-    """
-    Full-text search with PostgreSQL ts_vector.
-    
-    Returns:
-        List of tuples (chunk_id, rank_score, rank)
-    """
-    filters = []
-    params = {"query": query, "limit": k}
-    
-    if category_id:
-        filters.append("pd.category_id = :category_id")
-        params["category_id"] = category_id
-    if date_from:
-        filters.append("pd.upload_date >= :date_from")
-        params["date_from"] = date_from
-    if date_to:
-        filters.append("pd.upload_date <= :date_to")
-        params["date_to"] = date_to
-    
-    where_clause = " AND ".join(filters) if filters else "TRUE"
-    
-    sql = f"""
-        SELECT 
-            dc.chunk_id,
-            ts_rank_cd(
-                to_tsvector('english', dc.chunk_text),
-                plainto_tsquery('english', :query)
-            ) AS rank_score
-        FROM document_chunks dc
-        JOIN pdf_documents pd ON pd.document_id = dc.document_id
-        WHERE to_tsvector('english', dc.chunk_text) @@ plainto_tsquery('english', :query)
-          AND {where_clause}
-        ORDER BY rank_score DESC
-        LIMIT :limit
-    """
-    
-    results = db.execute(text(sql), params).fetchall()
-    return [(r.chunk_id, r.rank_score, idx + 1) for idx, r in enumerate(results)]
+class KeywordRetriever(BaseRetriever):
+    """Full-text search retriever using PostgreSQL tsvector on langchain_pg_embedding."""
+
+    k: int = 20
+    category_id: Optional[int] = None
+    date_from: Optional[datetime] = None
+    date_to: Optional[datetime] = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> List[Document]:
+        engine = _get_search_engine()
+        params: dict = {
+            "query": query,
+            "limit": self.k,
+            "collection_name": COLLECTION_NAME,
+        }
+
+        extra_filters = [
+            "to_tsvector('english', lpe.document) @@ plainto_tsquery('english', :query)"
+        ]
+
+        if self.category_id is not None:
+            extra_filters.append("(lpe.cmetadata->>'category_id')::int = :category_id")
+            params["category_id"] = self.category_id
+
+        if self.date_from is not None:
+            extra_filters.append(
+                "(lpe.cmetadata->>'upload_date')::timestamp >= :date_from"
+            )
+            params["date_from"] = self.date_from
+
+        if self.date_to is not None:
+            extra_filters.append(
+                "(lpe.cmetadata->>'upload_date')::timestamp <= :date_to"
+            )
+            params["date_to"] = self.date_to
+
+        extra_where = " AND ".join(extra_filters)
+
+        sql = text(f"""
+            SELECT
+                lpe.document,
+                lpe.cmetadata,
+                ts_rank_cd(
+                    to_tsvector('english', lpe.document),
+                    plainto_tsquery('english', :query)
+                ) AS rank_score
+            FROM langchain_pg_embedding lpe
+            WHERE lpe.collection_id = (
+                SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
+            )
+            AND {extra_where}
+            ORDER BY rank_score DESC
+            LIMIT :limit
+        """)
+
+        with engine.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        return [
+            Document(
+                page_content=row.document,
+                metadata=dict(row.cmetadata) if row.cmetadata else {},
+            )
+            for row in rows
+        ]
 
 
-def rrf_merge(
-    semantic_results: List[tuple],
-    keyword_results: List[tuple],
-    k: int = 60,
-    semantic_weight: float = 0.7,
-    keyword_weight: float = 0.3,
-) -> List[int]:
-    """
-    Reciprocal Rank Fusion to combine search results.
-    
-    RRF Score = sum(weight / (k + rank)) for each search source
-    
-    Args:
-        semantic_results: [(chunk_id, distance, rank), ...]
-        keyword_results: [(chunk_id, score, rank), ...]
-        k: RRF constant (default 60)
-        semantic_weight: Weight for semantic search
-        keyword_weight: Weight for keyword search
-    
-    Returns:
-        Sorted list of chunk_ids
-    """
-    scores = {}
-    chunk_ranks = {}
-    
-    for chunk_id, _, rank in semantic_results:
-        scores[chunk_id] = scores.get(chunk_id, 0) + semantic_weight / (k + rank)
-        if chunk_id not in chunk_ranks:
-            chunk_ranks[chunk_id] = {"vector": None, "keyword": None}
-        chunk_ranks[chunk_id]["vector"] = rank
-    
-    for chunk_id, _, rank in keyword_results:
-        scores[chunk_id] = scores.get(chunk_id, 0) + keyword_weight / (k + rank)
-        if chunk_id not in chunk_ranks:
-            chunk_ranks[chunk_id] = {"vector": None, "keyword": None}
-        chunk_ranks[chunk_id]["keyword"] = rank
-    
-    sorted_chunks = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
-    return sorted_chunks, scores, chunk_ranks
+# ---------------------------------------------------------------------------
+# Helper: convert List[Document] → List[SearchResult]
+# ---------------------------------------------------------------------------
 
 
-def get_chunk_details(db: Session, chunk_ids: List[int]) -> dict:
-    """Get complete information for a list of chunks."""
-    if not chunk_ids:
-        return {}
-    
-    placeholders = ", ".join(str(cid) for cid in chunk_ids)
-    
-    sql = f"""
-        SELECT 
-            dc.chunk_id,
-            dc.document_id,
-            dc.page_number,
-            dc.chunk_index,
-            dc.chunk_text,
-            pd.title AS document_title,
-            pd.category_id,
-            pd.language,
-            pd.upload_date,
-            c.name AS category_name
-        FROM document_chunks dc
-        JOIN pdf_documents pd ON pd.document_id = dc.document_id
-        LEFT JOIN categories c ON c.category_id = pd.category_id
-        WHERE dc.chunk_id IN ({placeholders})
-    """
-    
-    results = db.execute(text(sql)).fetchall()
-    return {r.chunk_id: r for r in results}
+def _parse_upload_date(raw) -> datetime:
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            pass
+    return datetime.now()
+
+
+def _docs_to_results(
+    docs: List[Document],
+    search_type: str,
+) -> List[SearchResult]:
+    results = []
+    n = len(docs)
+    for i, doc in enumerate(docs):
+        meta = doc.metadata or {}
+        # Rank-based synthetic score so that position 0 has the highest value
+        score = 1.0 / (1.0 + i) if search_type != "semantic" else meta.get("score", 0.0)
+        results.append(
+            SearchResult(
+                chunk_id=0,  # No sequential int ID in LangChain's vector store
+                document_id=meta.get("document_id", 0),
+                document_title=meta.get("document_title", ""),
+                page_number=meta.get("page_number", 0),
+                chunk_index=meta.get("chunk_index", 0),
+                chunk_text=doc.page_content,
+                category_id=meta.get("category_id"),
+                category_name=meta.get("category_name"),
+                language=meta.get("language", ""),
+                upload_date=_parse_upload_date(meta.get("upload_date")),
+                score=score,
+            )
+        )
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Helpers for document management
+# ---------------------------------------------------------------------------
+
+
+def delete_document_vectors(document_id: int) -> None:
+    """Delete all langchain_pg_embedding rows for a document."""
+    engine = _get_search_engine()
+    sql = text("""
+        DELETE FROM langchain_pg_embedding
+        WHERE collection_id = (
+            SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
+        )
+        AND cmetadata @> :metadata_filter::jsonb
+    """)
+    with engine.connect() as conn:
+        conn.execute(
+            sql,
+            {
+                "collection_name": COLLECTION_NAME,
+                "metadata_filter": json.dumps({"document_id": document_id}),
+            },
+        )
+        conn.commit()
+
+
+def get_chunks_for_document(document_id: int) -> list[dict]:
+    """Return ordered chunk rows for a document from langchain_pg_embedding."""
+    engine = _get_search_engine()
+    sql = text("""
+        SELECT
+            lpe.document AS chunk_text,
+            lpe.cmetadata AS metadata
+        FROM langchain_pg_embedding lpe
+        WHERE lpe.collection_id = (
+            SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
+        )
+        AND lpe.cmetadata @> :metadata_filter::jsonb
+        ORDER BY
+            (lpe.cmetadata->>'page_number')::int,
+            (lpe.cmetadata->>'chunk_index')::int
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sql,
+            {
+                "collection_name": COLLECTION_NAME,
+                "metadata_filter": json.dumps({"document_id": document_id}),
+            },
+        ).fetchall()
+
+    return [
+        {
+            "chunk_text": row.chunk_text,
+            "page_number": (row.metadata or {}).get("page_number", 0),
+            "chunk_index": (row.metadata or {}).get("chunk_index", 0),
+        }
+        for row in rows
+    ]
+
+
+def count_chunks_for_document(document_id: int) -> int:
+    """Count chunks in langchain_pg_embedding for a specific document."""
+    engine = _get_search_engine()
+    sql = text("""
+        SELECT COUNT(*) FROM langchain_pg_embedding
+        WHERE collection_id = (
+            SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
+        )
+        AND cmetadata @> :metadata_filter::jsonb
+    """)
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {
+                "collection_name": COLLECTION_NAME,
+                "metadata_filter": json.dumps({"document_id": document_id}),
+            },
+        ).scalar()
+    return result or 0
+
+
+def count_all_chunks() -> int:
+    """Count all chunks in the collection."""
+    engine = _get_search_engine()
+    sql = text("""
+        SELECT COUNT(*) FROM langchain_pg_embedding
+        WHERE collection_id = (
+            SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
+        )
+    """)
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql, {"collection_name": COLLECTION_NAME}
+        ).scalar()
+    return result or 0
+
+
+# ---------------------------------------------------------------------------
+# Public search functions (same signatures as before)
+# ---------------------------------------------------------------------------
+
+
+def _build_filter(category_id, date_from, date_to) -> Optional[dict]:
+    """Build a metadata filter dict for PGVector (supports category_id only)."""
+    if category_id is not None:
+        return {"category_id": category_id}
+    return None
 
 
 def hybrid_search(
@@ -220,196 +357,34 @@ def hybrid_search(
     keyword_weight: float = 0.3,
 ) -> SearchResponse:
     """
-    Hybrid search combining semantic and keyword search.
-    
-    Args:
-        db: Database session
-        query: Search query
-        k: Number of results to return
-        category_id: Filter by category
-        date_from: Filter from date
-        date_to: Filter to date
-        semantic_weight: Weight for semantic search (0-1)
-        keyword_weight: Weight for keyword search (0-1)
-    
-    Returns:
-        SearchResponse with combined results
+    Hybrid search combining semantic (PGVector) and keyword (FTS) search
+    via EnsembleRetriever with weighted Reciprocal Rank Fusion.
     """
-    filter_kwargs = {
-        "category_id": category_id,
-        "date_from": date_from,
-        "date_to": date_to,
-    }
-    
-    semantic_results = semantic_search(db, query, k=k*2, **filter_kwargs)
-    keyword_results = keyword_search(db, query, k=k*2, **filter_kwargs)
-    
-    if not semantic_results and not keyword_results:
-        return SearchResponse(
-            query=query,
-            results=[],
-            total_count=0,
-            search_type="hybrid"
-        )
-    
-    sorted_chunk_ids, scores, chunk_ranks = rrf_merge(
-        semantic_results,
-        keyword_results,
-        semantic_weight=semantic_weight,
-        keyword_weight=keyword_weight,
+    vs = get_vector_store()
+    meta_filter = _build_filter(category_id, date_from, date_to)
+
+    semantic_ret = vs.as_retriever(
+        search_kwargs={"k": k * 2, "filter": meta_filter}
     )
-    
-    top_chunk_ids = sorted_chunk_ids[:k]
-    chunk_details = get_chunk_details(db, top_chunk_ids)
-    
-    results = []
-    for chunk_id in top_chunk_ids:
-        if chunk_id not in chunk_details:
-            continue
-        
-        row = chunk_details[chunk_id]
-        ranks = chunk_ranks.get(chunk_id, {})
-        
-        results.append(SearchResult(
-            chunk_id=chunk_id,
-            document_id=row.document_id,
-            document_title=row.document_title,
-            page_number=row.page_number,
-            chunk_index=row.chunk_index,
-            chunk_text=row.chunk_text,
-            category_id=row.category_id,
-            category_name=row.category_name,
-            language=row.language,
-            upload_date=row.upload_date,
-            score=scores.get(chunk_id, 0),
-            vector_rank=ranks.get("vector"),
-            keyword_rank=ranks.get("keyword"),
-        ))
-    
+    keyword_ret = KeywordRetriever(
+        k=k * 2,
+        category_id=category_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    ensemble = EnsembleRetriever(
+        retrievers=[semantic_ret, keyword_ret],
+        weights=[semantic_weight, keyword_weight],
+    )
+
+    docs = ensemble.invoke(query)[:k]
+    results = _docs_to_results(docs, "hybrid")
+
     return SearchResponse(
         query=query,
         results=results,
         total_count=len(results),
-        search_type="hybrid"
-    )
-
-
-def semantic_only_search(
-    db: Session,
-    query: str,
-    k: int = 10,
-    category_id: Optional[int] = None,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-) -> SearchResponse:
-    """Semantic search only (without keywords)."""
-    filter_kwargs = {
-        "category_id": category_id,
-        "date_from": date_from,
-        "date_to": date_to,
-    }
-    
-    semantic_results = semantic_search(db, query, k=k, **filter_kwargs)
-    
-    if not semantic_results:
-        return SearchResponse(
-            query=query,
-            results=[],
-            total_count=0,
-            search_type="semantic"
-        )
-    
-    chunk_ids = [r[0] for r in semantic_results]
-    chunk_details = get_chunk_details(db, chunk_ids)
-    
-    results = []
-    for chunk_id, distance, rank in semantic_results:
-        if chunk_id not in chunk_details:
-            continue
-        
-        row = chunk_details[chunk_id]
-        similarity = 1 - distance
-        
-        results.append(SearchResult(
-            chunk_id=chunk_id,
-            document_id=row.document_id,
-            document_title=row.document_title,
-            page_number=row.page_number,
-            chunk_index=row.chunk_index,
-            chunk_text=row.chunk_text,
-            category_id=row.category_id,
-            category_name=row.category_name,
-            language=row.language,
-            upload_date=row.upload_date,
-            score=similarity,
-            vector_rank=rank,
-            keyword_rank=None,
-        ))
-    
-    return SearchResponse(
-        query=query,
-        results=results,
-        total_count=len(results),
-        search_type="semantic"
-    )
-
-
-def keyword_only_search(
-    db: Session,
-    query: str,
-    k: int = 10,
-    category_id: Optional[int] = None,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-) -> SearchResponse:
-    """Keyword search only (without semantics)."""
-    filter_kwargs = {
-        "category_id": category_id,
-        "date_from": date_from,
-        "date_to": date_to,
-    }
-    
-    keyword_results = keyword_search(db, query, k=k, **filter_kwargs)
-    
-    if not keyword_results:
-        return SearchResponse(
-            query=query,
-            results=[],
-            total_count=0,
-            search_type="keyword"
-        )
-    
-    chunk_ids = [r[0] for r in keyword_results]
-    chunk_details = get_chunk_details(db, chunk_ids)
-    
-    results = []
-    for chunk_id, rank_score, rank in keyword_results:
-        if chunk_id not in chunk_details:
-            continue
-        
-        row = chunk_details[chunk_id]
-        
-        results.append(SearchResult(
-            chunk_id=chunk_id,
-            document_id=row.document_id,
-            document_title=row.document_title,
-            page_number=row.page_number,
-            chunk_index=row.chunk_index,
-            chunk_text=row.chunk_text,
-            category_id=row.category_id,
-            category_name=row.category_name,
-            language=row.language,
-            upload_date=row.upload_date,
-            score=float(rank_score),
-            vector_rank=None,
-            keyword_rank=rank,
-        ))
-    
-    return SearchResponse(
-        query=query,
-        results=results,
-        total_count=len(results),
-        search_type="keyword"
+        search_type="hybrid",
     )
 
 
@@ -425,87 +400,155 @@ def hybrid_search_with_reranking(
     keyword_weight: float = 0.3,
 ) -> SearchResponse:
     """
-    Hybrid search with Cross-Encoder re-ranking.
-    
-    Step 1: Fetch more candidates with regular hybrid search (bi-encoder)
-    Step 2: Re-rank candidates with Cross-Encoder for better precision
-    
-    Args:
-        db: Database session
-        query: Search query
-        k: Number of final results to return
-        rerank_candidates: Number of candidates to fetch for re-ranking (should be > k)
-        category_id: Filter by category
-        date_from: Filter from date
-        date_to: Filter to date
-        semantic_weight: Weight for semantic search (0-1)
-        keyword_weight: Weight for keyword search (0-1)
-    
-    Returns:
-        SearchResponse with re-ranked results
+    Hybrid search with Cross-Encoder reranking via ContextualCompressionRetriever.
+
+    Step 1: EnsembleRetriever fetches rerank_candidates docs.
+    Step 2: CrossEncoderReranker reranks and returns top-k.
     """
-    filter_kwargs = {
-        "category_id": category_id,
-        "date_from": date_from,
-        "date_to": date_to,
-    }
-    
-    semantic_results = semantic_search(db, query, k=rerank_candidates, **filter_kwargs)
-    keyword_results = keyword_search(db, query, k=rerank_candidates, **filter_kwargs)
-    
-    if not semantic_results and not keyword_results:
-        return SearchResponse(
-            query=query,
-            results=[],
-            total_count=0,
-            search_type="hybrid_reranked"
-        )
-    
-    sorted_chunk_ids, scores, chunk_ranks = rrf_merge(
-        semantic_results,
-        keyword_results,
-        semantic_weight=semantic_weight,
-        keyword_weight=keyword_weight,
+    vs = get_vector_store()
+    meta_filter = _build_filter(category_id, date_from, date_to)
+
+    semantic_ret = vs.as_retriever(
+        search_kwargs={"k": rerank_candidates, "filter": meta_filter}
     )
-    
-    candidate_chunk_ids = sorted_chunk_ids[:rerank_candidates]
-    chunk_details = get_chunk_details(db, candidate_chunk_ids)
-    
-    texts_to_rerank = []
-    valid_chunk_ids = []
-    for chunk_id in candidate_chunk_ids:
-        if chunk_id in chunk_details:
-            texts_to_rerank.append(chunk_details[chunk_id].chunk_text)
-            valid_chunk_ids.append(chunk_id)
-    
-    reranked = rerank_results(query, texts_to_rerank, top_k=k)
-    
+    keyword_ret = KeywordRetriever(
+        k=rerank_candidates,
+        category_id=category_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    ensemble = EnsembleRetriever(
+        retrievers=[semantic_ret, keyword_ret],
+        weights=[semantic_weight, keyword_weight],
+    )
+
+    reranker = CrossEncoderReranker(
+        model=HuggingFaceCrossEncoder(model_name=get_cross_encoder_model_name()),
+        top_n=k,
+    )
+    compression_retriever = ContextualCompressionRetriever(
+        base_compressor=reranker,
+        base_retriever=ensemble,
+    )
+
+    docs = compression_retriever.invoke(query)
+
+    # Populate rerank_score from relevance_score metadata set by CrossEncoderReranker
     results = []
-    for new_rank, (original_idx, rerank_score) in enumerate(reranked, start=1):
-        chunk_id = valid_chunk_ids[original_idx]
-        row = chunk_details[chunk_id]
-        ranks = chunk_ranks.get(chunk_id, {})
-        
-        results.append(SearchResult(
-            chunk_id=chunk_id,
-            document_id=row.document_id,
-            document_title=row.document_title,
-            page_number=row.page_number,
-            chunk_index=row.chunk_index,
-            chunk_text=row.chunk_text,
-            category_id=row.category_id,
-            category_name=row.category_name,
-            language=row.language,
-            upload_date=row.upload_date,
-            score=scores.get(chunk_id, 0),
-            vector_rank=ranks.get("vector"),
-            keyword_rank=ranks.get("keyword"),
-            rerank_score=rerank_score,
-        ))
-    
+    for i, doc in enumerate(docs):
+        meta = doc.metadata or {}
+        upload_date = _parse_upload_date(meta.get("upload_date"))
+        rerank_score = meta.get("relevance_score")
+        results.append(
+            SearchResult(
+                chunk_id=0,
+                document_id=meta.get("document_id", 0),
+                document_title=meta.get("document_title", ""),
+                page_number=meta.get("page_number", 0),
+                chunk_index=meta.get("chunk_index", 0),
+                chunk_text=doc.page_content,
+                category_id=meta.get("category_id"),
+                category_name=meta.get("category_name"),
+                language=meta.get("language", ""),
+                upload_date=upload_date,
+                score=1.0 / (1.0 + i),
+                rerank_score=float(rerank_score) if rerank_score is not None else None,
+            )
+        )
+
     return SearchResponse(
         query=query,
         results=results,
         total_count=len(results),
-        search_type="hybrid_reranked"
+        search_type="hybrid_reranked",
+    )
+
+
+def semantic_only_search(
+    db: Session,
+    query: str,
+    k: int = 10,
+    category_id: Optional[int] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> SearchResponse:
+    """Semantic search only using PGVector cosine similarity."""
+    vs = get_vector_store()
+    meta_filter = _build_filter(category_id, date_from, date_to)
+
+    docs_and_scores = vs.similarity_search_with_relevance_scores(
+        query, k=k, filter=meta_filter
+    )
+
+    results = []
+    for i, (doc, score) in enumerate(docs_and_scores):
+        meta = doc.metadata or {}
+        results.append(
+            SearchResult(
+                chunk_id=0,
+                document_id=meta.get("document_id", 0),
+                document_title=meta.get("document_title", ""),
+                page_number=meta.get("page_number", 0),
+                chunk_index=meta.get("chunk_index", 0),
+                chunk_text=doc.page_content,
+                category_id=meta.get("category_id"),
+                category_name=meta.get("category_name"),
+                language=meta.get("language", ""),
+                upload_date=_parse_upload_date(meta.get("upload_date")),
+                score=float(score),
+                vector_rank=i + 1,
+            )
+        )
+
+    return SearchResponse(
+        query=query,
+        results=results,
+        total_count=len(results),
+        search_type="semantic",
+    )
+
+
+def keyword_only_search(
+    db: Session,
+    query: str,
+    k: int = 10,
+    category_id: Optional[int] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> SearchResponse:
+    """Keyword (full-text) search only using PostgreSQL tsvector."""
+    keyword_ret = KeywordRetriever(
+        k=k,
+        category_id=category_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    docs = keyword_ret.invoke(query)
+
+    results = []
+    for i, doc in enumerate(docs):
+        meta = doc.metadata or {}
+        results.append(
+            SearchResult(
+                chunk_id=0,
+                document_id=meta.get("document_id", 0),
+                document_title=meta.get("document_title", ""),
+                page_number=meta.get("page_number", 0),
+                chunk_index=meta.get("chunk_index", 0),
+                chunk_text=doc.page_content,
+                category_id=meta.get("category_id"),
+                category_name=meta.get("category_name"),
+                language=meta.get("language", ""),
+                upload_date=_parse_upload_date(meta.get("upload_date")),
+                score=1.0 / (1.0 + i),
+                keyword_rank=i + 1,
+            )
+        )
+
+    return SearchResponse(
+        query=query,
+        results=results,
+        total_count=len(results),
+        search_type="keyword",
     )

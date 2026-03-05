@@ -6,24 +6,28 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
+from langchain_core.documents import Document
+
 from app.database import get_db, init_pgvector
-from app.models import (
-    Category, PdfDocument, DocumentChunk, ChunkEmbedding
-)
+from app.models import Category, PdfDocument
 from app.pdf_extraction import extract_pdf_document
 from app.rag.chunking import split_page_text
-from app.rag.embeddings import get_embeddings
+from app.rag.embeddings import get_embeddings, get_model_info
 from app.rag.search import (
     hybrid_search,
     hybrid_search_with_reranking,
     semantic_only_search,
     keyword_only_search,
     SearchResponse,
+    get_vector_store,
+    delete_document_vectors,
+    get_chunks_for_document,
+    count_chunks_for_document,
+    count_all_chunks,
 )
-from app.rag.embeddings import get_model_info
-from app.rag.llm import generate_answer, check_ollama_status, get_llm_info
+from app.rag.llm import generate_answer, check_llm_status, get_llm_info
 
-app = FastAPI(title="PDF Search API", version="3.0")
+app = FastAPI(title="PDF Search API", version="4.0")
 
 
 # =============================================================================
@@ -46,7 +50,7 @@ class AskQuery(BaseModel):
     question: str
     k: int = 5
     category_id: Optional[int] = None
-    model: str = "llama3.2"
+    model: str = "gemini-2.0-flash"
     rerank: bool = True
 
 
@@ -72,6 +76,9 @@ class BulkCategoryUpdate(BaseModel):
 @app.on_event("startup")
 def startup():
     init_pgvector()
+    # Warm up the vector store so langchain_pg_collection / langchain_pg_embedding
+    # tables are created before the first request.
+    get_vector_store()
 
 
 # =============================================================================
@@ -88,10 +95,10 @@ def health_check(db: Session = Depends(get_db)):
 async def system_info():
     model_info = get_model_info()
     llm_info = get_llm_info()
-    ollama_status = await check_ollama_status()
+    ollama_status = await check_llm_status()
     return {
         "name": "PDF RAG API",
-        "version": "3.0",
+        "version": "4.0",
         "search_modes": ["hybrid", "hybrid_reranked", "semantic", "keyword"],
         "embedding_model": model_info["embedding_model"],
         "embedding_dimensions": model_info["embedding_dimensions"],
@@ -143,12 +150,12 @@ def list_documents(
     db: Session = Depends(get_db)
 ):
     query = db.query(PdfDocument)
-    
+
     if category_id:
         query = query.filter(PdfDocument.category_id == category_id)
-    
+
     documents = query.order_by(PdfDocument.upload_date.desc()).all()
-    
+
     return [{
         "document_id": d.document_id,
         "title": d.title,
@@ -164,14 +171,12 @@ def get_document(document_id: int, db: Session = Depends(get_db)):
     document = db.query(PdfDocument).filter(
         PdfDocument.document_id == document_id
     ).first()
-    
+
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    chunk_count = db.query(DocumentChunk).filter(
-        DocumentChunk.document_id == document_id
-    ).count()
-    
+
+    chunk_count = count_chunks_for_document(document_id)
+
     return {
         "document_id": document.document_id,
         "title": document.title,
@@ -194,20 +199,20 @@ def update_document(
     document = db.query(PdfDocument).filter(
         PdfDocument.document_id == document_id
     ).first()
-    
+
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
+
     if update.title is not None:
         document.title = update.title
     if update.category_id is not None:
         document.category_id = update.category_id
     if update.language is not None:
         document.language = update.language
-    
+
     db.commit()
     db.refresh(document)
-    
+
     return {
         "document_id": document.document_id,
         "title": document.title,
@@ -227,16 +232,16 @@ def bulk_update_category(
     category = db.query(Category).filter(
         Category.category_id == update.category_id
     ).first()
-    
+
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
-    
+
     updated_count = db.query(PdfDocument).filter(
         PdfDocument.document_id.in_(update.document_ids)
     ).update({"category_id": update.category_id}, synchronize_session=False)
-    
+
     db.commit()
-    
+
     return {
         "updated_count": updated_count,
         "category_id": update.category_id,
@@ -255,12 +260,12 @@ async def upload_document(
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
-    
+
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Invalid content-type, must be application/pdf")
-    
+
     pdf_data = await file.read()
-    
+
     document = PdfDocument(
         title=title,
         category_id=category_id,
@@ -270,60 +275,60 @@ async def upload_document(
     db.add(document)
     db.commit()
     db.refresh(document)
-    
+
+    # Resolve category name for metadata (needed for search result display)
+    category_name = document.category.name if document.category else None
+
     extraction_result = None
     if extract_text:
         lang_map = {"en": "eng", "sv": "swe+eng", "de": "deu+eng"}
         ocr_lang = lang_map.get(language, "eng")
-        
+
         extraction = extract_pdf_document(pdf_data, lang=ocr_lang)
-        
-        all_chunks = []
+
+        lc_docs = []
         for page in extraction.pages:
             sub_chunks = split_page_text(page.text)
             for idx, chunk_text in enumerate(sub_chunks):
-                chunk = DocumentChunk(
-                    document_id=document.document_id,
-                    page_number=page.page_num,
-                    chunk_index=idx,
-                    chunk_text=chunk_text
+                lc_docs.append(
+                    Document(
+                        page_content=chunk_text,
+                        metadata={
+                            "document_id": document.document_id,
+                            "document_title": document.title,
+                            "page_number": page.page_num,
+                            "chunk_index": idx,
+                            "category_id": document.category_id,
+                            "category_name": category_name,
+                            "language": document.language,
+                            "upload_date": document.upload_date.isoformat(),
+                        },
+                    )
                 )
-                db.add(chunk)
-                all_chunks.append(chunk)
-        
-        db.commit()
-        
+
+        chunks_created = len(lc_docs)
         embeddings_created = 0
-        if all_chunks:
-            embedder = get_embeddings()
-            chunk_texts = [c.chunk_text for c in all_chunks]
-            vectors = embedder.embed_documents(chunk_texts)
-            
-            for chunk, vector in zip(all_chunks, vectors):
-                embedding = ChunkEmbedding(
-                    chunk_id=chunk.chunk_id,
-                    embedding=vector
-                )
-                db.add(embedding)
-                embeddings_created += 1
-            
-            db.commit()
-        
+
+        if lc_docs:
+            vs = get_vector_store()
+            vs.add_documents(lc_docs)
+            embeddings_created = chunks_created
+
         extraction_result = {
             "total_pages": extraction.total_pages,
             "ocr_pages": extraction.ocr_pages_count,
             "total_chars": len(extraction.full_text),
-            "chunks_created": len(all_chunks),
-            "embeddings_created": embeddings_created
+            "chunks_created": chunks_created,
+            "embeddings_created": embeddings_created,
         }
-    
+
     return {
         "document_id": document.document_id,
         "title": document.title,
         "language": document.language,
         "upload_date": document.upload_date,
         "size_bytes": len(pdf_data),
-        "extraction": extraction_result
+        "extraction": extraction_result,
     }
 
 
@@ -332,12 +337,16 @@ def delete_document(document_id: int, db: Session = Depends(get_db)):
     document = db.query(PdfDocument).filter(
         PdfDocument.document_id == document_id
     ).first()
-    
+
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
+
     db.delete(document)
     db.commit()
+
+    # Remove vectors from langchain_pg_embedding
+    delete_document_vectors(document_id)
+
     return {"deleted": True, "document_id": document_id}
 
 
@@ -350,15 +359,15 @@ def get_document_pdf(
     document = db.query(PdfDocument).filter(
         PdfDocument.document_id == document_id
     ).first()
-    
+
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
+
     headers = {}
     if download:
         safe_title = document.title.replace('"', '\\"')
         headers["Content-Disposition"] = f'attachment; filename="{safe_title}.pdf"'
-    
+
     return Response(
         content=document.pdf_data,
         media_type="application/pdf",
@@ -368,16 +377,14 @@ def get_document_pdf(
 
 @app.get("/documents/{document_id}/chunks")
 def get_document_chunks(document_id: int, db: Session = Depends(get_db)):
-    chunks = db.query(DocumentChunk).filter(
-        DocumentChunk.document_id == document_id
-    ).order_by(DocumentChunk.page_number, DocumentChunk.chunk_index).all()
+    chunks = get_chunks_for_document(document_id)
     return [{
-        "chunk_id": c.chunk_id,
-        "page_number": c.page_number,
-        "chunk_index": c.chunk_index,
-        "chunk_text": c.chunk_text,
-        "has_embedding": c.embedding is not None
-    } for c in chunks]
+        "chunk_id": i,
+        "page_number": c["page_number"],
+        "chunk_index": c["chunk_index"],
+        "chunk_text": c["chunk_text"],
+        "has_embedding": True,  # All stored chunks have embeddings in PGVector
+    } for i, c in enumerate(chunks)]
 
 
 @app.get("/documents/{document_id}/text")
@@ -385,22 +392,19 @@ def get_document_text(document_id: int, db: Session = Depends(get_db)):
     document = db.query(PdfDocument).filter(
         PdfDocument.document_id == document_id
     ).first()
-    
+
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    chunks = db.query(DocumentChunk).filter(
-        DocumentChunk.document_id == document_id
-    ).order_by(DocumentChunk.page_number, DocumentChunk.chunk_index).all()
-    
-    full_text = "\n\n".join(c.chunk_text for c in chunks if c.chunk_text)
-    
+
+    chunks = get_chunks_for_document(document_id)
+    full_text = "\n\n".join(c["chunk_text"] for c in chunks if c["chunk_text"])
+
     return {
         "document_id": document_id,
         "title": document.title,
         "total_chunks": len(chunks),
         "total_chars": len(full_text),
-        "full_text": full_text
+        "full_text": full_text,
     }
 
 
@@ -437,7 +441,7 @@ def format_search_response(response: SearchResponse) -> dict:
 def search(query: SearchQuery, db: Session = Depends(get_db)):
     """
     Hybrid search: combines semantic vector search with keyword search.
-    
+
     Uses Reciprocal Rank Fusion (RRF) for best results.
     With rerank=true, Cross-Encoder is used to re-rank the results.
     """
@@ -471,7 +475,7 @@ def search(query: SearchQuery, db: Session = Depends(get_db)):
 def search_semantic(query: SearchQuery, db: Session = Depends(get_db)):
     """
     Semantic search only with vector similarity.
-    
+
     Best for conceptual queries and fuzzy matching.
     """
     response = semantic_only_search(
@@ -489,7 +493,7 @@ def search_semantic(query: SearchQuery, db: Session = Depends(get_db)):
 def search_keyword(query: SearchQuery, db: Session = Depends(get_db)):
     """
     Keyword search only with PostgreSQL fulltext.
-    
+
     Best for exact terms and specific phrases.
     """
     response = keyword_only_search(
@@ -511,12 +515,12 @@ def search_keyword(query: SearchQuery, db: Session = Depends(get_db)):
 async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
     """
     Ask a question and get an AI-generated answer based on the documents.
-    
+
     Full RAG pipeline:
     1. Searches for relevant chunks using hybrid search
     2. Uses Cross-Encoder reranking for better precision
-    3. Generates answer with local LLM (Ollama)
-    
+    3. Generates answer with local LLM (Ollama via LangChain ChatOllama)
+
     Requires Ollama to run locally with the specified model.
     """
     if query.rerank:
@@ -534,7 +538,7 @@ async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
             k=query.k,
             category_id=query.category_id,
         )
-    
+
     if not search_response.results:
         return {
             "question": query.question,
@@ -542,9 +546,9 @@ async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
             "sources": [],
             "model": query.model,
         }
-    
+
     context_chunks = [r.chunk_text for r in search_response.results]
-    
+
     try:
         answer = await generate_answer(
             query=query.question,
@@ -554,9 +558,9 @@ async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(
             status_code=503,
-            detail=f"Could not connect to Ollama. Run 'ollama serve' and 'ollama pull {query.model}'. Error: {str(e)}"
+            detail=f"Gemini API call failed. Check that GOOGLE_API_KEY is set in backend/.env. Error: {str(e)}"
         )
-    
+
     sources = [{
         "document_id": r.document_id,
         "document_title": r.document_title,
@@ -564,7 +568,7 @@ async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
         "chunk_text": r.chunk_text[:200] + "..." if len(r.chunk_text) > 200 else r.chunk_text,
         "score": round(r.score, 4),
     } for r in search_response.results]
-    
+
     return {
         "question": query.question,
         "answer": answer,
@@ -582,14 +586,13 @@ async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
 def get_statistics(db: Session = Depends(get_db)):
     """Get system statistics."""
     doc_count = db.query(PdfDocument).count()
-    chunk_count = db.query(DocumentChunk).count()
-    embedding_count = db.query(ChunkEmbedding).count()
     category_count = db.query(Category).count()
-    
+    chunk_count = count_all_chunks()
+
     return {
         "documents": doc_count,
         "chunks": chunk_count,
-        "embeddings": embedding_count,
+        "embeddings": chunk_count,  # Every chunk has an embedding in PGVector
         "categories": category_count,
-        "indexed_percentage": round(embedding_count / chunk_count * 100, 1) if chunk_count > 0 else 0
+        "indexed_percentage": 100.0 if chunk_count > 0 else 0,
     }

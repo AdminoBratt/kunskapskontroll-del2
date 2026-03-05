@@ -1,74 +1,55 @@
 """
-Backwards compatibility for existing imports.
+LangChain LCEL RAG chain.
 
-This file is kept to avoid breaking existing code that imports from chains.py.
-All new search code is in search.py.
+Provides create_rag_chain() which wires a retriever into a full
+retrieve-then-generate pipeline using LangChain Expression Language (LCEL).
 """
 
 from dataclasses import dataclass
 from typing import List
 
-from app.rag.search import (
-    SearchResult,
-    SearchResponse,
-    hybrid_search,
-    semantic_only_search,
-    keyword_only_search,
-)
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.retrievers import BaseRetriever
+
+from app.rag.llm import DEFAULT_MODEL, get_llm
+
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on provided context.
+Rules:
+- Answer ONLY based on the information in the context below
+- If the answer is not in the context, say so clearly
+- Be concise and direct
+- Answer in the same language as the question
+
+Context: {context}"""
 
 
 @dataclass
 class RAGResponse:
-    """Backwards compatible response class."""
+    """Response shape returned by /ask."""
     answer: str
     sources: List[dict]
     question: str
 
 
-def rag_query_without_llm(question: str, k: int = 5) -> RAGResponse:
+def create_rag_chain(retriever: BaseRetriever, model: str = DEFAULT_MODEL):
     """
-    Backwards compatible function for semantic search.
-    
-    Use instead: search.semantic_only_search()
+    Build a full LCEL RAG chain.
+
+    Returns a chain that accepts {"input": question} and produces
+    {"answer": str, "context": List[Document]}.
+
+    Usage:
+        chain = create_rag_chain(retriever)
+        result = chain.invoke({"input": "What is X?"})
+        answer = result["answer"]
+        sources = result["context"]
     """
-    from app.database import SessionLocal
-    
-    with SessionLocal() as db:
-        response = semantic_only_search(db, question, k=k)
-    
-    class FakeDoc:
-        def __init__(self, result: SearchResult):
-            self.page_content = result.chunk_text
-            self.metadata = {
-                "chunk_id": result.chunk_id,
-                "document_id": result.document_id,
-                "document_title": result.document_title,
-                "page_number": result.page_number,
-                "chunk_index": result.chunk_index,
-                "similarity": result.score,
-                "distance": 1 - result.score,
-            }
-    
-    sources = [FakeDoc(r) for r in response.results]
-    
-    return RAGResponse(
-        answer="",
-        sources=sources,
-        question=question
-    )
-
-
-def get_rag_chain_info() -> dict:
-    """Return system information."""
-    return {
-        "llm": {
-            "available": False,
-            "model_path": None,
-            "status": "LLM removed - search-only mode"
-        },
-        "retriever": {
-            "type": "HybridSearch",
-            "default_k": 10,
-            "methods": ["semantic", "keyword", "hybrid"]
-        },
-    }
+    llm = get_llm(model)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT),
+        ("human", "{input}"),
+    ])
+    doc_chain = create_stuff_documents_chain(llm, prompt)
+    return create_retrieval_chain(retriever, doc_chain)
