@@ -1,21 +1,21 @@
 """
-Embeddings module for local vector representations.
+Embeddings module using Google Gemini API.
 
-Uses LangChain's HuggingFaceEmbeddings (wraps sentence-transformers locally).
+Uses LangChain's GoogleGenerativeAIEmbeddings (gemini-embedding-001).
 Cross-Encoder is kept from sentence-transformers for re-ranking search results.
 
 Model is configured via environment variables:
-  - EMBEDDING_MODEL: Embedding model (default: paraphrase-multilingual-mpnet-base-v2)
+  - EMBEDDING_MODEL: Embedding model (default: models/gemini-embedding-001)
   - CROSS_ENCODER_MODEL: Reranking model (default: ms-marco-MiniLM-L-6-v2)
 """
 
 import os
 from typing import List
 
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from sentence_transformers import CrossEncoder
 
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+DEFAULT_EMBEDDING_MODEL = "models/gemini-embedding-001"
 DEFAULT_CROSS_ENCODER = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
@@ -29,20 +29,21 @@ def get_cross_encoder_model_name() -> str:
     return os.getenv("CROSS_ENCODER_MODEL", DEFAULT_CROSS_ENCODER)
 
 
-_embeddings_cache: dict[str, HuggingFaceEmbeddings] = {}
+_embeddings_cache: dict[str, GoogleGenerativeAIEmbeddings] = {}
 
 
-def get_embeddings() -> HuggingFaceEmbeddings:
+def get_embeddings() -> GoogleGenerativeAIEmbeddings:
     """
-    Get HuggingFaceEmbeddings instance (cached per model name).
+    Get GoogleGenerativeAIEmbeddings instance (cached per model name).
 
-    HuggingFaceEmbeddings implements the Embeddings protocol:
+    GoogleGenerativeAIEmbeddings implements the Embeddings protocol:
     embed_documents(texts) and embed_query(text).
+    Requires GOOGLE_API_KEY in the environment.
     """
     model_name = get_embedding_model_name()
     if model_name not in _embeddings_cache:
         print(f"[Embeddings] Loading model: {model_name}")
-        _embeddings_cache[model_name] = HuggingFaceEmbeddings(model_name=model_name)
+        _embeddings_cache[model_name] = GoogleGenerativeAIEmbeddings(model=model_name)
     return _embeddings_cache[model_name]
 
 
@@ -97,10 +98,8 @@ def rerank_results(
 
 def get_model_info() -> dict:
     """Return information about current models."""
-    embeddings = get_embeddings()
-    dim = embeddings.client.get_sentence_embedding_dimension()
     return {
         "embedding_model": get_embedding_model_name(),
         "cross_encoder_model": get_cross_encoder_model_name(),
-        "embedding_dimensions": dim,
+        "embedding_dimensions": 768,
     }
