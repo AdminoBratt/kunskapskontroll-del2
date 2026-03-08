@@ -1,0 +1,174 @@
+.page {}
+
+.heading {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  letter-spacing: -0.3px;
+}
+
+.sub {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.docList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.docCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.docHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.docHeader:hover {
+  background: var(--bg);
+}
+
+.docIcon {
+  width: 32px;
+  height: 32px;
+  background: var(--accent-light);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.docIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.docInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.docTitle {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+
+.docMeta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.docMetaItem {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.chevron {
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+.chunksPanel {
+  border-top: 1px solid var(--border-light);
+  background: var(--bg);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.chunksLoading {
+  padding: 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.chunkItem {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.chunkItem:last-child {
+  border-bottom: none;
+}
+
+.chunkMeta {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.chunkText {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+}
+
+.empty {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.emptyIcon {
+  width: 40px;
+  height: 40px;
+  margin: 0 auto 12px;
+  opacity: 0.3;
+}
