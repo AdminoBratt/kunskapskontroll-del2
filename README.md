@@ -205,7 +205,7 @@ kunskapskontroll-del2\
 |-----------|------------|
 | Backend | FastAPI + Python 3.12 |
 | Database | PostgreSQL + pgvector |
-| Embeddings | sentence-transformers (local) |
+| Embeddings |  models/gemini-embedding-001 |
 | Reranking | Cross-Encoder (local) |
 | LLM | Google Gemini API (gemini-2.0-flash) |
 | RAG Framework | LangChain (LCEL, langchain-postgres) |
