@@ -1,8 +1,6 @@
 # PDF RAG System
 
-A fully local RAG (Retrieval-Augmented Generation) system for PDF documents. Ask questions and get AI-generated answers based on your documents.
-
-
+A RAG (Retrieval-Augmented Generation) system for PDF documents. Ask questions and get AI-generated answers based on your documents.
 
 ## Features
 
@@ -10,9 +8,11 @@ A fully local RAG (Retrieval-Augmented Generation) system for PDF documents. Ask
 - **Hybrid Search**: Semantic vector search + keyword full-text search
 - **Cross-Encoder Reranking**: Improved precision for search results
 - **PDF Processing**: Automatic text extraction with OCR support
-- **Local LLM**: Ollama integration (llama3.2 or any model)
+- **Google Gemini LLM**: Cloud LLM via Google Gemini API (gemini-2.0-flash)
+- **LangChain**: LCEL chains for RAG pipeline and retrieval
 - **Streamlit UI**: Simple web interface for asking questions
-- **LangChain-free**: No framework dependencies, clean implementation
+- **React Frontend**: Full-featured UI with React 19 + Vite (Ask, Search, Upload, Library, Info pages)
+- **Categories**: Organize documents into categories
 
 ## Architecture
 
@@ -20,23 +20,27 @@ A fully local RAG (Retrieval-Augmented Generation) system for PDF documents. Ask
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          WINDOWS PC                                 │
 │                                                                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────────┐  │
-│  │    DOCKER    │  │    OLLAMA    │  │         BROWSER           │  │
-│  │              │  │              │  │                           │  │
-│  │  PostgreSQL  │  │  llama3.2    │  │  Streamlit UI             │  │
-│  │  + pgvector  │  │  (local LLM) │  │  http://localhost:8501    │  │
-│  │  port 5433   │  │  port 11434  │  │                           │  │
-│  └──────▲───────┘  └──────▲───────┘  └─────────────▲─────────────┘  │
-│         │                 │                        │                │
-│         └────────┬────────┴────────────────────────┘                │
+│  ┌──────────────┐  ┌──────────────────┐  ┌────────────────────────┐ │
+│  │    DOCKER    │  │   GOOGLE GEMINI  │  │        BROWSER         │ │
+│  │              │  │       API        │  │                        │ │
+│  │  PostgreSQL  │  │  gemini-2.0-flash│  │  React UI  :5173       │ │
+│  │  + pgvector  │  │  (cloud LLM)     │  │  Streamlit :8501       │ │
+│  │  port 5433   │  │                  │  │                        │ │
+│  └──────▲───────┘  └──────▲───────────┘  └───────────▲────────────┘ │
+│         │                 │                          │              │
+│         └────────┬────────┴──────────────────────────┘              │
 │                  │                                                  │
 │  ┌───────────────▼─────────────────────────────────────────────┐    │
-│  │                      PYTHON                                 │    │
+│  │                      PYTHON / NODE                          │    │
 │  │                                                             │    │
-│  │   Backend: http://localhost:8000                            │    │
-│  │   └── FastAPI + sentence-transformers + Cross-Encoder      │    │
+│  │   Backend:  http://localhost:8000                           │    │
+│  │   └── FastAPI + LangChain + sentence-transformers           │    │
+│  │       + Cross-Encoder + langchain-postgres (pgvector)       │    │
 │  │                                                             │    │
-│  │   Frontend: http://localhost:8501                           │    │
+│  │   Frontend (React): http://localhost:5173                   │    │
+│  │   └── React 19 + Vite + react-router-dom                    │    │
+│  │                                                             │    │
+│  │   Frontend (Streamlit): http://localhost:8501               │    │
 │  │   └── Streamlit                                             │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────┘
@@ -46,8 +50,9 @@ A fully local RAG (Retrieval-Augmented Generation) system for PDF documents. Ask
 
 - Windows 10/11
 - Python 3.12+ (https://python.org)
+- Node.js 18+ (https://nodejs.org) — for React frontend
 - Docker Desktop
-- Ollama (https://ollama.com)
+- Google API key (https://aistudio.google.com/app/apikey)
 
 ## Quick Start
 
@@ -56,32 +61,33 @@ A fully local RAG (Retrieval-Augmented Generation) system for PDF documents. Ask
 docker start postgres-pgvector
 ```
 
-### 2. Ollama (runs automatically after installation)
-First time only:
+### 2. Start Backend (PowerShell)
 ```powershell
-ollama pull llama3.2
-```
-
-### 3. Start Backend (PowerShell)
-```powershell
-cd "C:\Users\sigge bratt\RAG\backend"
+cd "C:\Users\sigge bratt\Desktop\Examen\kunskapskontroll-del2\backend"
 .\venv\Scripts\Activate.ps1
 uvicorn app.main:app --reload
 ```
 
-### 4. Start Frontend (new PowerShell window)
+### 3. Start React Frontend (new PowerShell window)
 ```powershell
-cd "C:\Users\sigge bratt\RAG\frontend"
-.\venv\Scripts\Activate.ps1
-streamlit run app.py
+cd "C:\Users\sigge bratt\Desktop\Examen\kunskapskontroll-del2\frontend-react"
+npm run dev
 ```
 
-### 5. Open Browser
+### 4. Open Browser
 ```
-http://localhost:8501
+http://localhost:5173
 ```
 
 Upload a PDF and ask questions!
+
+> **Alternative:** The Streamlit frontend is also available:
+> ```powershell
+> cd "C:\Users\sigge bratt\Desktop\Examen\kunskapskontroll-del2\frontend"
+> .\venv\Scripts\Activate.ps1
+> streamlit run app.py
+> # Open http://localhost:8501
+> ```
 
 ## First-Time Setup
 
@@ -89,15 +95,21 @@ Upload a PDF and ask questions!
 
 **Backend:**
 ```powershell
-cd "C:\Users\sigge bratt\RAG\backend"
+cd "C:\Users\sigge bratt\Desktop\Examen\kunskapskontroll-del2\backend"
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-**Frontend:**
+**React Frontend:**
 ```powershell
-cd "C:\Users\sigge bratt\RAG\frontend"
+cd "C:\Users\sigge bratt\Desktop\Examen\kunskapskontroll-del2\frontend-react"
+npm install
+```
+
+**Streamlit Frontend:**
+```powershell
+cd "C:\Users\sigge bratt\Desktop\Examen\kunskapskontroll-del2\frontend"
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -109,7 +121,7 @@ pip install -r requirements.txt
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/ask` | **Ask a question** - returns AI answer + sources |
+| `POST` | `/ask` | Ask a question - returns AI answer + sources |
 
 ```powershell
 curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"question": "What does the document say about...?"}'
@@ -119,15 +131,31 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/documents` | List all documents |
+| `GET` | `/documents` | List all documents (filter by `?category_id=`) |
+| `GET` | `/documents/{id}` | Get document metadata + chunk count |
 | `POST` | `/documents/upload` | Upload PDF |
+| `PATCH` | `/documents/{id}` | Update title, category, or language |
+| `PATCH` | `/documents/bulk/category` | Bulk update category for multiple documents |
 | `DELETE` | `/documents/{id}` | Delete document |
+| `GET` | `/documents/{id}/pdf` | Download PDF (`?download=true` for attachment) |
+| `GET` | `/documents/{id}/chunks` | List all chunks for a document |
+| `GET` | `/documents/{id}/text` | Get full extracted text |
+
+### Categories
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/categories` | List all categories |
+| `POST` | `/categories` | Create category |
+| `DELETE` | `/categories/{id}` | Delete category |
 
 ### Search
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/search` | Hybrid search (semantic + keyword) |
+| `POST` | `/search` | Hybrid search (semantic + keyword, optional reranking) |
+| `POST` | `/search/semantic` | Semantic vector search only |
+| `POST` | `/search/keyword` | PostgreSQL fulltext keyword search only |
 
 ### System
 
@@ -140,25 +168,34 @@ curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{
 ## Project Structure
 
 ```
-C:\Users\sigge bratt\RAG\
+kunskapskontroll-del2\
 ├── backend\
 │   ├── app\
 │   │   ├── main.py              # FastAPI routes
-│   │   ├── models.py            # Database models
+│   │   ├── models.py            # Database models (PdfDocument, Category)
 │   │   ├── database.py          # PostgreSQL connection
 │   │   ├── pdf_extraction.py    # PDF text extraction
 │   │   └── rag\
 │   │       ├── search.py        # Hybrid search, RRF, reranking
 │   │       ├── embeddings.py    # Sentence-transformers
 │   │       ├── chunking.py      # Text chunking
-│   │       └── llm.py           # Ollama integration
-│   ├── venv\                    # Python virtual environment
+│   │       ├── llm.py           # Google Gemini API integration
+│   │       └── chains.py        # LangChain LCEL RAG chain
+│   ├── venv\
 │   ├── requirements.txt
 │   └── .env
 ├── frontend\
 │   ├── app.py                   # Streamlit UI
 │   ├── venv\
 │   └── requirements.txt
+├── frontend-react\
+│   ├── src\
+│   │   ├── App.jsx              # Router + layout
+│   │   ├── api\                 # API client modules (ask, search, documents, info)
+│   │   ├── components\          # Shared UI components (Button, Card, Alert, Layout)
+│   │   └── pages\               # Ask, Search, Upload, Library, Info pages
+│   ├── package.json
+│   └── vite.config.js
 └── README.md
 ```
 
@@ -168,10 +205,12 @@ C:\Users\sigge bratt\RAG\
 |-----------|------------|
 | Backend | FastAPI + Python 3.12 |
 | Database | PostgreSQL + pgvector |
-| Embeddings | sentence-transformers (768 dim) |
-| Reranking | Cross-Encoder |
-| LLM | Ollama (llama3.2) |
-| Frontend | Streamlit |
+| Embeddings | sentence-transformers (local) |
+| Reranking | Cross-Encoder (local) |
+| LLM | Google Gemini API (gemini-2.0-flash) |
+| RAG Framework | LangChain (LCEL, langchain-postgres) |
+| Frontend (React) | React 19 + Vite + react-router-dom |
+| Frontend (Streamlit) | Streamlit |
 | PDF Extraction | PyMuPDF + Tesseract OCR |
 
 ## How RAG Works
@@ -180,8 +219,8 @@ C:\Users\sigge bratt\RAG\
 1. You ask a question
 2. System searches for relevant chunks (hybrid search)
 3. Cross-Encoder reranks for better precision
-4. Top chunks + question sent to local LLM
-5. LLM generates answer based only on your documents
+4. Top chunks + question sent to Google Gemini API
+5. Gemini generates answer based only on your documents
 6. Answer returned with source citations
 ```
 
@@ -190,7 +229,10 @@ C:\Users\sigge bratt\RAG\
 ```
 # backend\.env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres
+GOOGLE_API_KEY=your_google_api_key_here
 ```
+
+Get a Google API key at: https://aistudio.google.com/app/apikey
 
 ## Troubleshooting
 
@@ -199,8 +241,9 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-### Ollama not found
-Install from https://ollama.com/download/windows
+### Gemini API not available
+- Check that `GOOGLE_API_KEY` is set in `backend\.env`
+- Get a key at https://aistudio.google.com/app/apikey
 
 ### Database connection refused
 ```powershell
@@ -208,4 +251,4 @@ docker start postgres-pgvector
 ```
 
 ### Slow first query
-First query downloads/loads embedding models (~1GB). Subsequent queries are faster.
+First query loads embedding and reranking models (~1GB). Subsequent queries are faster.
