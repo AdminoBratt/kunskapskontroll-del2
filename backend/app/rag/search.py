@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
-from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
-from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain_classic.retrievers import ContextualCompressionRetriever, EnsembleRetriever
+from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
@@ -249,7 +249,7 @@ def delete_document_vectors(document_id: int) -> None:
         WHERE collection_id = (
             SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
         )
-        AND cmetadata @> :metadata_filter::jsonb
+        AND cmetadata @> CAST(:metadata_filter AS jsonb)
     """)
     with engine.connect() as conn:
         conn.execute(
@@ -273,7 +273,7 @@ def get_chunks_for_document(document_id: int) -> list[dict]:
         WHERE lpe.collection_id = (
             SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
         )
-        AND lpe.cmetadata @> :metadata_filter::jsonb
+        AND lpe.cmetadata @> CAST(:metadata_filter AS jsonb)
         ORDER BY
             (lpe.cmetadata->>'page_number')::int,
             (lpe.cmetadata->>'chunk_index')::int
@@ -305,7 +305,7 @@ def count_chunks_for_document(document_id: int) -> int:
         WHERE collection_id = (
             SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
         )
-        AND cmetadata @> :metadata_filter::jsonb
+        AND cmetadata @> CAST(:metadata_filter AS jsonb)
     """)
     with engine.connect() as conn:
         result = conn.execute(
@@ -327,11 +327,14 @@ def count_all_chunks() -> int:
             SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
         )
     """)
-    with engine.connect() as conn:
-        result = conn.execute(
-            sql, {"collection_name": COLLECTION_NAME}
-        ).scalar()
-    return result or 0
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                sql, {"collection_name": COLLECTION_NAME}
+            ).scalar()
+        return result or 0
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
