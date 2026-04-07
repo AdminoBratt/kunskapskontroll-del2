@@ -50,6 +50,17 @@
   color: var(--text);
 }
 
+.danger {
+  background: transparent;
+  color: #e05555;
+  border-color: #e05555;
+}
+
+.danger:not(:disabled):hover {
+  background: #e05555;
+  color: #fff;
+}
+
 .sm {
   padding: 5px 10px;
   font-size: 12px;

@@ -318,8 +318,14 @@ async def upload_document(
         embeddings_created = 0
 
         if lc_docs:
+            import time
             vs = get_vector_store()
-            vs.add_documents(lc_docs)
+            batch_size = 80
+            for i in range(0, len(lc_docs), batch_size):
+                batch = lc_docs[i:i + batch_size]
+                vs.add_documents(batch)
+                if i + batch_size < len(lc_docs):
+                    time.sleep(65)
             embeddings_created = chunks_created
 
         extraction_result = {

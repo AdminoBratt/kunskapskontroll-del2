@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getDocuments, getDocumentChunks } from '../api/documents';
+import { getDocuments, getDocumentChunks, deleteDocument } from '../api/documents';
 import Button from '../components/Button';
 import Alert from '../components/Alert';
 import styles from './LibraryPage.module.css';
@@ -11,6 +11,7 @@ export default function LibraryPage() {
   const [openDoc, setOpenDoc] = useState(null);
   const [chunks, setChunks] = useState({});
   const [chunksLoading, setChunksLoading] = useState({});
+  const [deleting, setDeleting] = useState({});
 
   useEffect(() => {
     getDocuments()
@@ -36,6 +37,21 @@ export default function LibraryPage() {
       } finally {
         setChunksLoading((p) => ({ ...p, [id]: false }));
       }
+    }
+  };
+
+  const handleDelete = async (e, id) => {
+    e.stopPropagation();
+    if (!window.confirm('Ta bort dokumentet och alla dess embeddings?')) return;
+    setDeleting((p) => ({ ...p, [id]: true }));
+    try {
+      await deleteDocument(id);
+      setDocuments((p) => p.filter((d) => (d.document_id ?? d.id) !== id));
+      if (openDoc === id) setOpenDoc(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting((p) => ({ ...p, [id]: false }));
     }
   };
 
@@ -99,6 +115,14 @@ export default function LibraryPage() {
                     )}
                   </div>
                 </div>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  loading={deleting[id]}
+                  onClick={(e) => handleDelete(e, id)}
+                >
+                  Delete
+                </Button>
                 <ChevronIcon className={`${styles.chevron}${isOpen ? ' ' + styles.open : ''}`} />
               </div>
 
