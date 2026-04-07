@@ -1,11 +1,9 @@
 """
-Hybrid search using LangChain's PGVector, EnsembleRetriever,
-and ContextualCompressionRetriever with CrossEncoderReranker.
+Semantic search using LangChain's PGVector.
 
 Vector store: langchain_postgres.PGVector (manages langchain_pg_collection /
 langchain_pg_embedding tables).
-Hybrid fusion: EnsembleRetriever with weighted RRF (semantic 0.7, keyword 0.3).
-Reranking: CrossEncoderReranker via ContextualCompressionRetriever.
+Search: cosine similarity via PGVector.
 """
 
 import json
@@ -14,17 +12,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
-from langchain_classic.retrievers import ContextualCompressionRetriever, EnsembleRetriever
-from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
-from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
-from langchain_core.retrievers import BaseRetriever
 from langchain_postgres import PGVector
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from app.rag.embeddings import get_cross_encoder_model_name, get_embeddings
+from app.rag.embeddings import get_embeddings
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/postgres"
@@ -33,7 +26,7 @@ COLLECTION_NAME = "pdf_chunks"
 
 
 # ---------------------------------------------------------------------------
-# SQLAlchemy engine for direct SQL queries (keyword FTS, chunk listing, etc.)
+# SQLAlchemy engine for direct SQL queries (chunk listing, delete, count).
 # Uses psycopg2 dialect (same as the main app engine).
 # ---------------------------------------------------------------------------
 
@@ -81,13 +74,13 @@ def get_vector_store() -> PGVector:
 
 
 # ---------------------------------------------------------------------------
-# Data classes (unchanged public interface)
+# Data classes
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class SearchResult:
-    """A search result from the hybrid search."""
+    """A search result from semantic search."""
     chunk_id: int
     document_id: int
     document_title: str
@@ -100,8 +93,6 @@ class SearchResult:
     upload_date: datetime
     score: float
     vector_rank: Optional[int] = None
-    keyword_rank: Optional[int] = None
-    rerank_score: Optional[float] = None
 
 
 @dataclass
@@ -110,91 +101,7 @@ class SearchResponse:
     query: str
     results: List[SearchResult]
     total_count: int
-    search_type: str  # "hybrid", "semantic", "keyword", "hybrid_reranked"
-
-
-# ---------------------------------------------------------------------------
-# Keyword retriever (custom BaseRetriever with PostgreSQL FTS)
-# ---------------------------------------------------------------------------
-
-
-class KeywordRetriever(BaseRetriever):
-    """Full-text search retriever using PostgreSQL tsvector on langchain_pg_embedding."""
-
-    k: int = 20
-    category_id: Optional[int] = None
-    date_from: Optional[datetime] = None
-    date_to: Optional[datetime] = None
-
-    model_config = {"arbitrary_types_allowed": True}
-
-    def _get_relevant_documents(
-        self,
-        query: str,
-        *,
-        run_manager: CallbackManagerForRetrieverRun,
-    ) -> List[Document]:
-        engine = _get_search_engine()
-        params: dict = {
-            "query": query,
-            "limit": self.k,
-            "collection_name": COLLECTION_NAME,
-        }
-
-        extra_filters = [
-            "to_tsvector('english', lpe.document) @@ plainto_tsquery('english', :query)"
-        ]
-
-        if self.category_id is not None:
-            extra_filters.append("(lpe.cmetadata->>'category_id')::int = :category_id")
-            params["category_id"] = self.category_id
-
-        if self.date_from is not None:
-            extra_filters.append(
-                "(lpe.cmetadata->>'upload_date')::timestamp >= :date_from"
-            )
-            params["date_from"] = self.date_from
-
-        if self.date_to is not None:
-            extra_filters.append(
-                "(lpe.cmetadata->>'upload_date')::timestamp <= :date_to"
-            )
-            params["date_to"] = self.date_to
-
-        extra_where = " AND ".join(extra_filters)
-
-        sql = text(f"""
-            SELECT
-                lpe.document,
-                lpe.cmetadata,
-                ts_rank_cd(
-                    to_tsvector('english', lpe.document),
-                    plainto_tsquery('english', :query)
-                ) AS rank_score
-            FROM langchain_pg_embedding lpe
-            WHERE lpe.collection_id = (
-                SELECT uuid FROM langchain_pg_collection WHERE name = :collection_name
-            )
-            AND {extra_where}
-            ORDER BY rank_score DESC
-            LIMIT :limit
-        """)
-
-        with engine.connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-
-        return [
-            Document(
-                page_content=row.document,
-                metadata=dict(row.cmetadata) if row.cmetadata else {},
-            )
-            for row in rows
-        ]
-
-
-# ---------------------------------------------------------------------------
-# Helper: convert List[Document] → List[SearchResult]
-# ---------------------------------------------------------------------------
+    search_type: str  # "semantic"
 
 
 def _parse_upload_date(raw) -> datetime:
@@ -207,33 +114,6 @@ def _parse_upload_date(raw) -> datetime:
             pass
     return datetime.now()
 
-
-def _docs_to_results(
-    docs: List[Document],
-    search_type: str,
-) -> List[SearchResult]:
-    results = []
-    n = len(docs)
-    for i, doc in enumerate(docs):
-        meta = doc.metadata or {}
-        # Rank-based synthetic score so that position 0 has the highest value
-        score = 1.0 / (1.0 + i) if search_type != "semantic" else meta.get("score", 0.0)
-        results.append(
-            SearchResult(
-                chunk_id=0,  # No sequential int ID in LangChain's vector store
-                document_id=meta.get("document_id", 0),
-                document_title=meta.get("document_title", ""),
-                page_number=meta.get("page_number", 0),
-                chunk_index=meta.get("chunk_index", 0),
-                chunk_text=doc.page_content,
-                category_id=meta.get("category_id"),
-                category_name=meta.get("category_name"),
-                language=meta.get("language", ""),
-                upload_date=_parse_upload_date(meta.get("upload_date")),
-                score=score,
-            )
-        )
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -338,133 +218,8 @@ def count_all_chunks() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Public search functions (same signatures as before)
+# Public search functions
 # ---------------------------------------------------------------------------
-
-
-def _build_filter(category_id, date_from, date_to) -> Optional[dict]:
-    """Build a metadata filter dict for PGVector (supports category_id only)."""
-    if category_id is not None:
-        return {"category_id": category_id}
-    return None
-
-
-def hybrid_search(
-    db: Session,
-    query: str,
-    k: int = 10,
-    category_id: Optional[int] = None,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-    semantic_weight: float = 0.7,
-    keyword_weight: float = 0.3,
-) -> SearchResponse:
-    """
-    Hybrid search combining semantic (PGVector) and keyword (FTS) search
-    via EnsembleRetriever with weighted Reciprocal Rank Fusion.
-    """
-    vs = get_vector_store()
-    meta_filter = _build_filter(category_id, date_from, date_to)
-
-    semantic_ret = vs.as_retriever(
-        search_kwargs={"k": k * 2, "filter": meta_filter}
-    )
-    keyword_ret = KeywordRetriever(
-        k=k * 2,
-        category_id=category_id,
-        date_from=date_from,
-        date_to=date_to,
-    )
-    ensemble = EnsembleRetriever(
-        retrievers=[semantic_ret, keyword_ret],
-        weights=[semantic_weight, keyword_weight],
-    )
-
-    docs = ensemble.invoke(query)[:k]
-    results = _docs_to_results(docs, "hybrid")
-
-    return SearchResponse(
-        query=query,
-        results=results,
-        total_count=len(results),
-        search_type="hybrid",
-    )
-
-
-def hybrid_search_with_reranking(
-    db: Session,
-    query: str,
-    k: int = 10,
-    rerank_candidates: int = 50,
-    category_id: Optional[int] = None,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-    semantic_weight: float = 0.7,
-    keyword_weight: float = 0.3,
-) -> SearchResponse:
-    """
-    Hybrid search with Cross-Encoder reranking via ContextualCompressionRetriever.
-
-    Step 1: EnsembleRetriever fetches rerank_candidates docs.
-    Step 2: CrossEncoderReranker reranks and returns top-k.
-    """
-    vs = get_vector_store()
-    meta_filter = _build_filter(category_id, date_from, date_to)
-
-    semantic_ret = vs.as_retriever(
-        search_kwargs={"k": rerank_candidates, "filter": meta_filter}
-    )
-    keyword_ret = KeywordRetriever(
-        k=rerank_candidates,
-        category_id=category_id,
-        date_from=date_from,
-        date_to=date_to,
-    )
-    ensemble = EnsembleRetriever(
-        retrievers=[semantic_ret, keyword_ret],
-        weights=[semantic_weight, keyword_weight],
-    )
-
-    reranker = CrossEncoderReranker(
-        model=HuggingFaceCrossEncoder(model_name=get_cross_encoder_model_name()),
-        top_n=k,
-    )
-    compression_retriever = ContextualCompressionRetriever(
-        base_compressor=reranker,
-        base_retriever=ensemble,
-    )
-
-    docs = compression_retriever.invoke(query)
-
-    # Populate rerank_score from relevance_score metadata set by CrossEncoderReranker
-    results = []
-    for i, doc in enumerate(docs):
-        meta = doc.metadata or {}
-        upload_date = _parse_upload_date(meta.get("upload_date"))
-        rerank_score = meta.get("relevance_score")
-        results.append(
-            SearchResult(
-                chunk_id=0,
-                document_id=meta.get("document_id", 0),
-                document_title=meta.get("document_title", ""),
-                page_number=meta.get("page_number", 0),
-                chunk_index=meta.get("chunk_index", 0),
-                chunk_text=doc.page_content,
-                category_id=meta.get("category_id"),
-                category_name=meta.get("category_name"),
-                language=meta.get("language", ""),
-                upload_date=upload_date,
-                score=1.0 / (1.0 + i),
-                rerank_score=float(rerank_score) if rerank_score is not None else None,
-            )
-        )
-
-    return SearchResponse(
-        query=query,
-        results=results,
-        total_count=len(results),
-        search_type="hybrid_reranked",
-    )
 
 
 def semantic_only_search(
@@ -475,9 +230,9 @@ def semantic_only_search(
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
 ) -> SearchResponse:
-    """Semantic search only using PGVector cosine similarity."""
+    """Semantic search using PGVector cosine similarity."""
     vs = get_vector_store()
-    meta_filter = _build_filter(category_id, date_from, date_to)
+    meta_filter = {"category_id": category_id} if category_id is not None else None
 
     docs_and_scores = vs.similarity_search_with_relevance_scores(
         query, k=k, filter=meta_filter
@@ -511,47 +266,3 @@ def semantic_only_search(
     )
 
 
-def keyword_only_search(
-    db: Session,
-    query: str,
-    k: int = 10,
-    category_id: Optional[int] = None,
-    date_from: Optional[datetime] = None,
-    date_to: Optional[datetime] = None,
-) -> SearchResponse:
-    """Keyword (full-text) search only using PostgreSQL tsvector."""
-    keyword_ret = KeywordRetriever(
-        k=k,
-        category_id=category_id,
-        date_from=date_from,
-        date_to=date_to,
-    )
-
-    docs = keyword_ret.invoke(query)
-
-    results = []
-    for i, doc in enumerate(docs):
-        meta = doc.metadata or {}
-        results.append(
-            SearchResult(
-                chunk_id=0,
-                document_id=meta.get("document_id", 0),
-                document_title=meta.get("document_title", ""),
-                page_number=meta.get("page_number", 0),
-                chunk_index=meta.get("chunk_index", 0),
-                chunk_text=doc.page_content,
-                category_id=meta.get("category_id"),
-                category_name=meta.get("category_name"),
-                language=meta.get("language", ""),
-                upload_date=_parse_upload_date(meta.get("upload_date")),
-                score=1.0 / (1.0 + i),
-                keyword_rank=i + 1,
-            )
-        )
-
-    return SearchResponse(
-        query=query,
-        results=results,
-        total_count=len(results),
-        search_type="keyword",
-    )

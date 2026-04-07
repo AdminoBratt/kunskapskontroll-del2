@@ -15,10 +15,7 @@ from app.pdf_extraction import extract_pdf_document
 from app.rag.chunking import split_page_text
 from app.rag.embeddings import get_embeddings, get_model_info
 from app.rag.search import (
-    hybrid_search,
-    hybrid_search_with_reranking,
     semantic_only_search,
-    keyword_only_search,
     SearchResponse,
     get_vector_store,
     delete_document_vectors,
@@ -48,10 +45,6 @@ class SearchQuery(BaseModel):
     category_id: Optional[int] = None
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
-    semantic_weight: float = 0.7
-    keyword_weight: float = 0.3
-    rerank: bool = False
-    rerank_candidates: int = 50
 
 
 class AskQuery(BaseModel):
@@ -59,7 +52,6 @@ class AskQuery(BaseModel):
     k: int = 5
     category_id: Optional[int] = None
     model: str = "gemini-2.0-flash"
-    rerank: bool = True
 
 
 class CategoryCreate(BaseModel):
@@ -107,11 +99,9 @@ async def system_info():
     return {
         "name": "PDF RAG API",
         "version": "4.0",
-        "search_modes": ["hybrid", "hybrid_reranked", "semantic", "keyword"],
+        "search_modes": ["semantic"],
         "embedding_model": model_info["embedding_model"],
         "embedding_dimensions": model_info["embedding_dimensions"],
-        "cross_encoder_model": model_info["cross_encoder_model"],
-        "reranking_available": True,
         "llm": {
             **llm_info,
             "status": ollama_status,
@@ -445,53 +435,13 @@ def format_search_response(response: SearchResponse) -> dict:
             "upload_date": r.upload_date.isoformat() if r.upload_date else None,
             "score": round(r.score, 4),
             "vector_rank": r.vector_rank,
-            "keyword_rank": r.keyword_rank,
-            "rerank_score": round(r.rerank_score, 4) if r.rerank_score is not None else None,
         } for r in response.results]
     }
 
 
 @app.post("/search")
 def search(query: SearchQuery, db: Session = Depends(get_db)):
-    """
-    Hybrid search: combines semantic vector search with keyword search.
-
-    Uses Reciprocal Rank Fusion (RRF) for best results.
-    With rerank=true, Cross-Encoder is used to re-rank the results.
-    """
-    if query.rerank:
-        response = hybrid_search_with_reranking(
-            db=db,
-            query=query.query,
-            k=query.k,
-            rerank_candidates=query.rerank_candidates,
-            category_id=query.category_id,
-            date_from=query.date_from,
-            date_to=query.date_to,
-            semantic_weight=query.semantic_weight,
-            keyword_weight=query.keyword_weight,
-        )
-    else:
-        response = hybrid_search(
-            db=db,
-            query=query.query,
-            k=query.k,
-            category_id=query.category_id,
-            date_from=query.date_from,
-            date_to=query.date_to,
-            semantic_weight=query.semantic_weight,
-            keyword_weight=query.keyword_weight,
-        )
-    return format_search_response(response)
-
-
-@app.post("/search/semantic")
-def search_semantic(query: SearchQuery, db: Session = Depends(get_db)):
-    """
-    Semantic search only with vector similarity.
-
-    Best for conceptual queries and fuzzy matching.
-    """
+    """Semantic vector search using PGVector cosine similarity."""
     response = semantic_only_search(
         db=db,
         query=query.query,
@@ -503,14 +453,10 @@ def search_semantic(query: SearchQuery, db: Session = Depends(get_db)):
     return format_search_response(response)
 
 
-@app.post("/search/keyword")
-def search_keyword(query: SearchQuery, db: Session = Depends(get_db)):
-    """
-    Keyword search only with PostgreSQL fulltext.
-
-    Best for exact terms and specific phrases.
-    """
-    response = keyword_only_search(
+@app.post("/search/semantic")
+def search_semantic(query: SearchQuery, db: Session = Depends(get_db)):
+    """Semantic search with vector similarity."""
+    response = semantic_only_search(
         db=db,
         query=query.query,
         k=query.k,
@@ -531,27 +477,15 @@ async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
     Ask a question and get an AI-generated answer based on the documents.
 
     Full RAG pipeline:
-    1. Searches for relevant chunks using hybrid search
-    2. Uses Cross-Encoder reranking for better precision
-    3. Generates answer with local LLM (Ollama via LangChain ChatOllama)
-
-    Requires Ollama to run locally with the specified model.
+    1. Searches for relevant chunks using semantic search
+    2. Generates answer with Gemini LLM
     """
-    if query.rerank:
-        search_response = hybrid_search_with_reranking(
-            db=db,
-            query=query.question,
-            k=query.k,
-            rerank_candidates=query.k * 5,
-            category_id=query.category_id,
-        )
-    else:
-        search_response = hybrid_search(
-            db=db,
-            query=query.question,
-            k=query.k,
-            category_id=query.category_id,
-        )
+    search_response = semantic_only_search(
+        db=db,
+        query=query.question,
+        k=query.k,
+        category_id=query.category_id,
+    )
 
     if not search_response.results:
         return {
