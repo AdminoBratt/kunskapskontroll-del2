@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { searchSemantic } from '../api/search';
+import { BASE_URL } from '../api/client';
 import Button from '../components/Button';
 import Alert from '../components/Alert';
 import styles from './SearchPage.module.css';
@@ -84,6 +85,16 @@ export default function SearchPage() {
               {openItems[i] && (
                 <div className={styles.resultBody}>
                   {r.chunk_text ?? r.page_content ?? ''}
+                  {(r.document_id ?? r.metadata?.document_id) != null && (
+                    <a
+                      className={styles.pdfLink}
+                      href={`${BASE_URL}/documents/${r.document_id ?? r.metadata.document_id}/pdf`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Visa PDF
+                    </a>
+                  )}
                 </div>
               )}
             </div>
