@@ -1,22 +1,11 @@
 import { useState } from 'react';
-import { searchHybrid, searchSemantic, searchKeyword } from '../api/search';
+import { searchSemantic } from '../api/search';
 import Button from '../components/Button';
 import Alert from '../components/Alert';
 import styles from './SearchPage.module.css';
 
-const MODES = [
-  { key: 'hybrid',   label: 'Hybrid' },
-  { key: 'semantic', label: 'Semantic' },
-  { key: 'keyword',  label: 'Keyword' },
-];
-
 export default function SearchPage() {
   const [query, setQuery] = useState('');
-  const [mode, setMode] = useState('hybrid');
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [rerank, setRerank] = useState(true);
-  const [semWeight, setSemWeight] = useState(0.7);
-  const [kwWeight, setKwWeight] = useState(0.3);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
@@ -30,16 +19,7 @@ export default function SearchPage() {
     setError(null);
     setOpenItems({});
     try {
-      const opts = {};
-      if (mode === 'hybrid') {
-        opts.rerank = rerank;
-        opts.semantic_weight = semWeight;
-        opts.keyword_weight = kwWeight;
-      }
-      const fn = mode === 'semantic' ? searchSemantic
-                : mode === 'keyword'  ? searchKeyword
-                : searchHybrid;
-      const data = await fn(query.trim(), opts);
+      const data = await searchSemantic(query.trim());
       setResults(data.results ?? data);
     } catch (err) {
       setError(err.message);
@@ -53,7 +33,7 @@ export default function SearchPage() {
   return (
     <div className={styles.page}>
       <h1 className={styles.heading}>Search</h1>
-      <p className={styles.sub}>Find chunks from your documents using semantic, keyword, or hybrid search.</p>
+      <p className={styles.sub}>Find chunks from your documents using semantic search.</p>
 
       <form onSubmit={handleSubmit}>
         <div className={styles.searchBar}>
@@ -69,70 +49,6 @@ export default function SearchPage() {
             Search
           </Button>
         </div>
-
-        <div className={styles.modeTabs}>
-          {MODES.map((m) => (
-            <button
-              key={m.key}
-              type="button"
-              className={`${styles.modeTab}${mode === m.key ? ' ' + styles.active : ''}`}
-              onClick={() => setMode(m.key)}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-
-        <button
-          type="button"
-          className={styles.advancedToggle}
-          onClick={() => setShowAdvanced((p) => !p)}
-        >
-          {showAdvanced ? '▾' : '▸'} Advanced options
-        </button>
-
-        {showAdvanced && (
-          <div className={styles.advancedPanel}>
-            <div className={styles.advRow}>
-              <span className={styles.advLabel}>Rerank results</span>
-              <label className={styles.toggle}>
-                <input
-                  type="checkbox"
-                  checked={rerank}
-                  onChange={(e) => setRerank(e.target.checked)}
-                />
-                <span className={styles.toggleTrack} />
-                <span className={styles.toggleThumb} />
-              </label>
-            </div>
-            {mode === 'hybrid' && (
-              <>
-                <div className={styles.advRow}>
-                  <span className={styles.advLabel}>Semantic weight</span>
-                  <input
-                    type="range"
-                    className={styles.slider}
-                    min={0} max={1} step={0.05}
-                    value={semWeight}
-                    onChange={(e) => setSemWeight(parseFloat(e.target.value))}
-                  />
-                  <span className={styles.advValue}>{semWeight.toFixed(2)}</span>
-                </div>
-                <div className={styles.advRow}>
-                  <span className={styles.advLabel}>Keyword weight</span>
-                  <input
-                    type="range"
-                    className={styles.slider}
-                    min={0} max={1} step={0.05}
-                    value={kwWeight}
-                    onChange={(e) => setKwWeight(parseFloat(e.target.value))}
-                  />
-                  <span className={styles.advValue}>{kwWeight.toFixed(2)}</span>
-                </div>
-              </>
-            )}
-          </div>
-        )}
       </form>
 
       {error && <Alert type="error">{error}</Alert>}
