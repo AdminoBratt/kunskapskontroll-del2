@@ -51,6 +51,7 @@ class AskQuery(BaseModel):
     question: str
     k: int = 5
     category_id: Optional[int] = None
+    document_id: Optional[int] = None
     model: str = "gemini-2.0-flash"
 
 
@@ -485,6 +486,7 @@ async def ask_question(query: AskQuery, db: Session = Depends(get_db)):
         query=query.question,
         k=query.k,
         category_id=query.category_id,
+        document_id=query.document_id,
     )
 
     if not search_response.results:

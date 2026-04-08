@@ -1,11 +1,12 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { searchSemantic } from '../api/search';
-import { BASE_URL } from '../api/client';
 import Button from '../components/Button';
 import Alert from '../components/Alert';
 import styles from './SearchPage.module.css';
 
 export default function SearchPage() {
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
@@ -86,14 +87,12 @@ export default function SearchPage() {
                 <div className={styles.resultBody}>
                   {r.chunk_text ?? r.page_content ?? ''}
                   {(r.document_id ?? r.metadata?.document_id) != null && (
-                    <a
+                    <button
                       className={styles.pdfLink}
-                      href={`${BASE_URL}/documents/${r.document_id ?? r.metadata.document_id}/pdf`}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      onClick={() => navigate(`/library/${r.document_id ?? r.metadata.document_id}`)}
                     >
                       Visa PDF
-                    </a>
+                    </button>
                   )}
                 </div>
               )}

@@ -227,12 +227,18 @@ def semantic_only_search(
     query: str,
     k: int = 10,
     category_id: Optional[int] = None,
+    document_id: Optional[int] = None,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
 ) -> SearchResponse:
     """Semantic search using PGVector cosine similarity."""
     vs = get_vector_store()
-    meta_filter = {"category_id": category_id} if category_id is not None else None
+    if document_id is not None:
+        meta_filter = {"document_id": document_id}
+    elif category_id is not None:
+        meta_filter = {"category_id": category_id}
+    else:
+        meta_filter = None
 
     docs_and_scores = vs.similarity_search_with_relevance_scores(
         query, k=k, filter=meta_filter

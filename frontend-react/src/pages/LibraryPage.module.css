@@ -37,19 +37,18 @@
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
-}
-
-.docHeader {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
   cursor: pointer;
   user-select: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 
-.docHeader:hover {
-  background: var(--bg);
+.docCard:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79,110,247,0.08);
 }
 
 .docIcon {
@@ -106,57 +105,6 @@
   background: var(--bg);
   color: var(--text-muted);
   border: 1px solid var(--border);
-}
-
-.chevron {
-  width: 14px;
-  height: 14px;
-  color: var(--text-muted);
-  transition: transform 0.15s;
-  flex-shrink: 0;
-}
-
-.chevron.open {
-  transform: rotate(180deg);
-}
-
-.chunksPanel {
-  border-top: 1px solid var(--border-light);
-  background: var(--bg);
-  max-height: 400px;
-  overflow-y: auto;
-}
-
-.chunksLoading {
-  padding: 16px;
-  font-size: 13px;
-  color: var(--text-muted);
-  text-align: center;
-}
-
-.chunkItem {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border-light);
-}
-
-.chunkItem:last-child {
-  border-bottom: none;
-}
-
-.chunkMeta {
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-}
-
-.chunkText {
-  font-size: 12px;
-  color: var(--text);
-  line-height: 1.55;
-  white-space: pre-wrap;
-  font-family: var(--font-mono);
 }
 
 .empty {
