@@ -42,7 +42,7 @@ def ask_question(question: str, model: str = "llama3.2") -> dict:
     """Send question to the RAG API."""
     response = httpx.post(
         f"{API_URL}/ask",
-        json={"question": question, "model": model, "k": 5, "rerank": True},
+        json={"question": question, "model": model, "k": 5},
         timeout=120.0,
     )
     response.raise_for_status()

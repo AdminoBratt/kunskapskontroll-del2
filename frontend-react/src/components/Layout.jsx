@@ -4,10 +4,9 @@ import { getStats, getInfo } from '../api/info';
 import styles from './Layout.module.css';
 
 const NAV = [
-  { to: '/ask',     label: 'Ask',      icon: <ChatIcon /> },
+  { to: '/library', label: 'Library',  icon: <LibraryIcon /> },
   { to: '/search',  label: 'Search',   icon: <SearchIcon /> },
   { to: '/upload',  label: 'Upload',   icon: <UploadIcon /> },
-  { to: '/library', label: 'Library',  icon: <LibraryIcon /> },
   { to: '/info',    label: 'System',   icon: <InfoIcon /> },
 ];
 
@@ -73,14 +72,6 @@ export default function Layout({ children }) {
         <div className={styles.content}>{children}</div>
       </main>
     </div>
-  );
-}
-
-function ChatIcon() {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M14 10.5A2 2 0 0 1 12 12.5H4.5L2 15V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6.5z"/>
-    </svg>
   );
 }
 

@@ -1,61 +1,18 @@
 import { useState, useEffect } from 'react';
-import { getDocuments, getDocumentChunks, deleteDocument } from '../api/documents';
+import { useNavigate } from 'react-router-dom';
+import { getDocuments, deleteDocument } from '../api/documents';
 import Button from '../components/Button';
 import Alert from '../components/Alert';
 import styles from './LibraryPage.module.css';
 
 export default function LibraryPage() {
+  const navigate = useNavigate();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [openDoc, setOpenDoc] = useState(null);
-  const [chunks, setChunks] = useState({});
-  const [chunksLoading, setChunksLoading] = useState({});
   const [deleting, setDeleting] = useState({});
 
-  useEffect(() => {
-    getDocuments()
-      .then(setDocuments)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
-
-  const toggleDoc = async (doc) => {
-    const id = doc.document_id ?? doc.id;
-    if (openDoc === id) {
-      setOpenDoc(null);
-      return;
-    }
-    setOpenDoc(id);
-    if (!chunks[id]) {
-      setChunksLoading((p) => ({ ...p, [id]: true }));
-      try {
-        const data = await getDocumentChunks(id);
-        setChunks((p) => ({ ...p, [id]: data }));
-      } catch {
-        setChunks((p) => ({ ...p, [id]: [] }));
-      } finally {
-        setChunksLoading((p) => ({ ...p, [id]: false }));
-      }
-    }
-  };
-
-  const handleDelete = async (e, id) => {
-    e.stopPropagation();
-    if (!window.confirm('Ta bort dokumentet och alla dess embeddings?')) return;
-    setDeleting((p) => ({ ...p, [id]: true }));
-    try {
-      await deleteDocument(id);
-      setDocuments((p) => p.filter((d) => (d.document_id ?? d.id) !== id));
-      if (openDoc === id) setOpenDoc(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setDeleting((p) => ({ ...p, [id]: false }));
-    }
-  };
-
-  const refresh = () => {
+  const load = () => {
     setLoading(true);
     setError(null);
     getDocuments()
@@ -64,16 +21,32 @@ export default function LibraryPage() {
       .finally(() => setLoading(false));
   };
 
+  useEffect(load, []);
+
+  const handleDelete = async (e, id) => {
+    e.stopPropagation();
+    if (!window.confirm('Ta bort dokumentet och alla dess embeddings?')) return;
+    setDeleting((p) => ({ ...p, [id]: true }));
+    try {
+      await deleteDocument(id);
+      setDocuments((p) => p.filter((d) => (d.document_id ?? d.id) !== id));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting((p) => ({ ...p, [id]: false }));
+    }
+  };
+
   return (
     <div className={styles.page}>
       <h1 className={styles.heading}>Document Library</h1>
-      <p className={styles.sub}>Browse uploaded documents and inspect their extracted chunks.</p>
+      <p className={styles.sub}>Click a document to read and chat with it.</p>
 
       <div className={styles.toolbar}>
         <span className={styles.count}>
-          {loading ? 'Loading...' : `${documents.length} document${documents.length !== 1 ? 's' : ''}`}
+          {loading ? 'Loading…' : `${documents.length} document${documents.length !== 1 ? 's' : ''}`}
         </span>
-        <Button variant="secondary" size="sm" onClick={refresh} loading={loading}>
+        <Button variant="secondary" size="sm" onClick={load} loading={loading}>
           Refresh
         </Button>
       </div>
@@ -82,9 +55,7 @@ export default function LibraryPage() {
 
       {!loading && documents.length === 0 && !error && (
         <div className={styles.empty}>
-          <div className={styles.emptyIcon}>
-            <EmptyIcon />
-          </div>
+          <div className={styles.emptyIcon}><EmptyIcon /></div>
           No documents yet. Upload a PDF to get started.
         </div>
       )}
@@ -92,61 +63,34 @@ export default function LibraryPage() {
       <div className={styles.docList}>
         {documents.map((doc) => {
           const id = doc.document_id ?? doc.id;
-          const isOpen = openDoc === id;
           return (
-            <div key={id} className={styles.docCard}>
-              <div className={styles.docHeader} onClick={() => toggleDoc(doc)}>
-                <div className={styles.docIcon}>
-                  <PdfIcon />
-                </div>
-                <div className={styles.docInfo}>
-                  <div className={styles.docTitle}>{doc.title}</div>
-                  <div className={styles.docMeta}>
-                    {doc.category && (
-                      <span className={styles.tag}>{doc.category}</span>
-                    )}
-                    {doc.language && (
-                      <span className={styles.docMetaItem}>{doc.language}</span>
-                    )}
-                    {doc.upload_date && (
-                      <span className={styles.docMetaItem}>
-                        {new Date(doc.upload_date).toLocaleDateString()}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={deleting[id]}
-                  onClick={(e) => handleDelete(e, id)}
-                >
-                  Delete
-                </Button>
-                <ChevronIcon className={`${styles.chevron}${isOpen ? ' ' + styles.open : ''}`} />
-              </div>
-
-              {isOpen && (
-                <div className={styles.chunksPanel}>
-                  {chunksLoading[id] ? (
-                    <div className={styles.chunksLoading}>Loading chunks...</div>
-                  ) : (chunks[id] ?? []).length === 0 ? (
-                    <div className={styles.chunksLoading}>No chunks found.</div>
-                  ) : (
-                    (chunks[id] ?? []).map((chunk, ci) => (
-                      <div key={ci} className={styles.chunkItem}>
-                        <div className={styles.chunkMeta}>
-                          Chunk {chunk.chunk_index ?? ci + 1}
-                          {chunk.page_number != null && ` · p. ${chunk.page_number}`}
-                        </div>
-                        <div className={styles.chunkText}>
-                          {chunk.chunk_text ?? chunk.text ?? ''}
-                        </div>
-                      </div>
-                    ))
+            <div
+              key={id}
+              className={styles.docCard}
+              onClick={() => navigate(`/library/${id}`)}
+            >
+              <div className={styles.docIcon}><PdfIcon /></div>
+              <div className={styles.docInfo}>
+                <div className={styles.docTitle}>{doc.title}</div>
+                <div className={styles.docMeta}>
+                  {doc.category && <span className={styles.tag}>{doc.category}</span>}
+                  {doc.language && <span className={styles.docMetaItem}>{doc.language}</span>}
+                  {doc.upload_date && (
+                    <span className={styles.docMetaItem}>
+                      {new Date(doc.upload_date).toLocaleDateString()}
+                    </span>
                   )}
                 </div>
-              )}
+              </div>
+              <Button
+                variant="danger"
+                size="sm"
+                loading={deleting[id]}
+                onClick={(e) => handleDelete(e, id)}
+              >
+                Delete
+              </Button>
+              <ChevronIcon />
             </div>
           );
         })}
@@ -164,10 +108,10 @@ function PdfIcon() {
   );
 }
 
-function ChevronIcon({ className }) {
+function ChevronIcon() {
   return (
-    <svg className={className} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 5l4 4 4-4"/>
+    <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ width: 14, height: 14, color: 'var(--text-muted)', flexShrink: 0 }}>
+      <path d="M5 3l4 4-4 4"/>
     </svg>
   );
 }

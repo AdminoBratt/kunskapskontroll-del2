@@ -1,10 +1,12 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { searchSemantic } from '../api/search';
 import Button from '../components/Button';
 import Alert from '../components/Alert';
 import styles from './SearchPage.module.css';
 
 export default function SearchPage() {
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
@@ -84,6 +86,14 @@ export default function SearchPage() {
               {openItems[i] && (
                 <div className={styles.resultBody}>
                   {r.chunk_text ?? r.page_content ?? ''}
+                  {(r.document_id ?? r.metadata?.document_id) != null && (
+                    <button
+                      className={styles.pdfLink}
+                      onClick={() => navigate(`/library/${r.document_id ?? r.metadata.document_id}`)}
+                    >
+                      Visa PDF
+                    </button>
+                  )}
                 </div>
               )}
             </div>

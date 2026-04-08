@@ -90,24 +90,6 @@ export default function InfoPage() {
             </div>
           </div>
 
-          {info.reranker && (
-            <div className={styles.section}>
-              <div className={styles.sectionTitle}>Reranker</div>
-              <div className={styles.infoCard}>
-                <InfoRow label="Model" value={info.reranker.model ?? '—'} />
-                <InfoRow
-                  label="Status"
-                  value={
-                    <span className={`${styles.pill} ${info.reranker.status === 'ok' ? styles.ok : styles.error}`}>
-                      <span className={styles.dot} />
-                      {info.reranker.status ?? 'unknown'}
-                    </span>
-                  }
-                />
-              </div>
-            </div>
-          )}
-
           {info.database && (
             <div className={styles.section}>
               <div className={styles.sectionTitle}>Database</div>

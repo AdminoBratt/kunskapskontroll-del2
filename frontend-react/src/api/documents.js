@@ -18,5 +18,6 @@ export const uploadDocument = async (file, title, category) => {
 };
 
 export const getDocuments = () => request('/documents');
+export const getDocument = (id) => request(`/documents/${id}`);
 export const getDocumentChunks = (id) => request(`/documents/${id}/chunks`);
 export const deleteDocument = (id) => request(`/documents/${id}`, { method: 'DELETE' });
