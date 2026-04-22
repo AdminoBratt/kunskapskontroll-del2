@@ -4,10 +4,8 @@ import { getStats, getInfo } from '../api/info';
 import styles from './Layout.module.css';
 
 const NAV = [
-  { to: '/library', label: 'Library',  icon: <LibraryIcon /> },
-  { to: '/search',  label: 'Search',   icon: <SearchIcon /> },
-  { to: '/upload',  label: 'Upload',   icon: <UploadIcon /> },
-  { to: '/info',    label: 'System',   icon: <InfoIcon /> },
+  { to: '/',     label: 'Documents', icon: <LibraryIcon /> },
+  { to: '/info', label: 'System',    icon: <InfoIcon /> },
 ];
 
 export default function Layout({ children }) {
@@ -33,6 +31,7 @@ export default function Layout({ children }) {
             <NavLink
               key={to}
               to={to}
+              end={to === '/'}
               className={({ isActive }) =>
                 `${styles.navLink}${isActive ? ' ' + styles.active : ''}`
               }
@@ -72,24 +71,6 @@ export default function Layout({ children }) {
         <div className={styles.content}>{children}</div>
       </main>
     </div>
-  );
-}
-
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="7" cy="7" r="4.5"/>
-      <path d="M10.5 10.5L14 14"/>
-    </svg>
-  );
-}
-
-function UploadIcon() {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M8 10V2M5 5l3-3 3 3"/>
-      <path d="M2 12v1a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-1"/>
-    </svg>
   );
 }
 

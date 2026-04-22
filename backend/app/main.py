@@ -134,6 +134,8 @@ def delete_category(category_id: int, db: Session = Depends(get_db)):
     category = db.query(Category).filter(Category.category_id == category_id).first()
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
+    # Clear category from documents before deleting to avoid FK constraint error
+    db.query(PdfDocument).filter(PdfDocument.category_id == category_id).update({"category_id": None})
     db.delete(category)
     db.commit()
     return {"deleted": True, "category_id": category_id}
@@ -204,7 +206,7 @@ def update_document(
 
     if update.title is not None:
         document.title = update.title
-    if update.category_id is not None:
+    if "category_id" in update.model_fields_set:
         document.category_id = update.category_id
     if update.language is not None:
         document.language = update.language
