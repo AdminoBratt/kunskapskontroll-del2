@@ -18,6 +18,9 @@ __pycache__/
 .vscode/
 .idea/
 
+# Claude Code
+.claude/
+
 # Node modules (frontend)
 frontend/node_modules/
 node_modules/
